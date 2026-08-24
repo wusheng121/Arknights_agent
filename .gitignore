@@ -33,15 +33,9 @@ deepseek_content.txt
 copilot_step.json
 copilot_formation.json
 
-# Data (large, download separately)
-data/
-
-# Digit templates (regenerable)
-digit_templates/
-
-# Game data (downloaded separately)
-data/
+# Game data (large, download separately)
+/data/
 # Job cache (regenerable)
-job_cache/
+/job_cache/
 # Debug
-debug/
+/debug/
