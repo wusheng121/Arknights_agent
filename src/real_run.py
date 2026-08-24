@@ -103,6 +103,22 @@ async def smoke_copilot_doc() -> None:
     with open(ops_path, encoding="utf-8") as f:
         operators = json.load(f)
     log.info("可用干员 %d 个", len(operators))
+
+    # 检查作业缓存(有缓存直接用,跳过 LLM)
+    _cache_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache", "main_01-07.json"))
+    if os.path.exists(_cache_path):
+        with open(_cache_path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("actions"):
+            log.info("=== 使用缓存作业: %s ===", _cache_path)
+            job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+            with open(job_path, "w", encoding="utf-8") as f:
+                json.dump(cached, f, ensure_ascii=False, indent=2)
+            job_data = cached
+            # 跳到 MAA 执行
+            await _run_maa_copilot(job_path, job_data)
+            return
+
     # 加载地图信息
     from src.data.map_info import parse_tile_json
     from src.data.oper_database import OperDatabase as _ODB
@@ -177,7 +193,11 @@ async def smoke_copilot_doc() -> None:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
 
     # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA)
-    # MAA 内部有完整 deploy_oper(update_deployment + calc_tiles + swipe)
+    await _run_maa_copilot(job_path, job_data)
+
+
+async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
+    """MAA Copilot 一体化执行: formation + 开始作战 + actions + 胜负检测。"""
     import subprocess as _sp
     import cv2 as _cv2
     import numpy as _np
@@ -203,7 +223,6 @@ async def smoke_copilot_doc() -> None:
         await asyncio.sleep(1)
         if not client.running():
             break
-        # 超过 30 秒还没进战斗, ADB tap 开始作战(只一次)
         if not _battle_started and not _adb_tapped and _time.time() - _start_time > 30:
             log.info("30 秒未进战斗, ADB tap 开始作战...")
             _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
@@ -235,7 +254,6 @@ async def smoke_copilot_doc() -> None:
         _stars = _detect_battle_result(ADB, ADDR, MAA)
         if _stars > 0:
             log.info("=== 通关! Stars=%d ===", _stars)
-            # 缓存通关作业
             _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
             os.makedirs(_cache_dir, exist_ok=True)
             _cache_path = os.path.join(_cache_dir, "main_01-07.json")
