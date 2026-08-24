@@ -1,0 +1,40 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Testing
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp/debug files
+shot_*.png
+cost_*.png
+debug_*.png
+diagnose_*.py
+deepseek_content.txt
+copilot_step.json
+copilot_formation.json
+
+# Data (large, download separately)
+data/
+
+# Digit templates (regenerable)
+digit_templates/
