@@ -89,10 +89,10 @@ async def smoke_copilot(steps: int) -> None:
     log.info("SingleStep 真实验证完成")
 
 
-async def smoke_copilot_doc() -> None:
+async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     import json
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    log.info("MAA=%s ADB=%s ADDR=%s", MAA, ADB, ADDR)
+    log.info("MAA=%s ADB=%s ADDR=%s stage=%s", MAA, ADB, ADDR, stage)
     if not os.getenv("DEEPSEEK_API_KEY", ""):
         log.error("DEEPSEEK_API_KEY 未填,请在 .env 填写")
         return
@@ -104,9 +104,23 @@ async def smoke_copilot_doc() -> None:
         operators = json.load(f)
     log.info("可用干员 %d 个", len(operators))
 
+    from src.data.stage_util import stage_code_to_id, get_tile_json_path, get_level_json_path, get_cache_path, ensure_level_json, list_available_stages
+    sid = stage_code_to_id(stage, MAA)
+
+    # MAA copilot 的 stage_name: 优先用 stageId (MAA 内部用 stageId 找 tile 数据)
+    stage_name_for_maa = sid
+
+    # 检查 tile 数据是否存在
+    tile_path = get_tile_json_path(MAA, stage)
+    if not os.path.exists(tile_path):
+        available = list_available_stages(MAA)
+        log.error("关卡 %s 的 tile 数据不存在! 可用关卡: %s", stage, available[:20])
+        return
+
     # 检查作业缓存(有缓存直接用,跳过 LLM)
-    _cache_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache", "main_01-07.json"))
-    if os.path.exists(_cache_path):
+    _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
+    _cache_path = get_cache_path(_cache_dir, stage, MAA)
+    if not fresh and os.path.exists(_cache_path):
         with open(_cache_path, encoding="utf-8") as f:
             cached = json.load(f)
         if cached.get("actions"):
@@ -115,20 +129,20 @@ async def smoke_copilot_doc() -> None:
             with open(job_path, "w", encoding="utf-8") as f:
                 json.dump(cached, f, ensure_ascii=False, indent=2)
             job_data = cached
-            # 跳到 MAA 执行
             await _run_maa_copilot(job_path, job_data)
             return
 
     # 加载地图信息
     from src.data.map_info import parse_tile_json
     from src.data.oper_database import OperDatabase as _ODB
-    tile_path = os.path.join(MAA, "resource", "Arknights-Tile-Pos",
-                            "main_01-07-obt-main-level_main_01-07.json")
+    tile_path = get_tile_json_path(MAA, stage)
     mi = None
     map_info = ""
     if os.path.exists(tile_path):
         mi = parse_tile_json(tile_path)
         map_info = mi.to_description()
+        if mi.to_tactical_description():
+            map_info += "\n" + mi.to_tactical_description()
         log.info("地图信息:\n%s", map_info)
     else:
         log.warning("未找到 tile 数据: %s", tile_path)
@@ -140,15 +154,29 @@ async def smoke_copilot_doc() -> None:
     from src.data.wave_parser import parse_level_json
     from src.data.enemy_lookup import to_compact_description as _enemy_desc
     gamedata = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "gamedata"))
-    level_path = os.path.join(gamedata, "levels", "obt", "main", "level_main_01-07.json")
+    level_path = get_level_json_path(gamedata, stage, MAA)
     handbook_path = os.path.join(gamedata, "excel", "enemy_handbook_table.json")
     enemy_db_path = os.path.join(gamedata, "levels", "enemydata", "enemy_database.json")
     wave_desc = ""
     enemy_ids = []
+    # 自动下载缺失的 level JSON
+    if not os.path.exists(level_path):
+        log.info("level JSON 不存在,自动下载...")
+        level_path = ensure_level_json(gamedata, stage, MAA) or level_path
     if os.path.exists(level_path):
         tl = parse_level_json(level_path, handbook_path, enemy_db_path)
         wave_desc = tl.to_description()
         enemy_ids = list(set(a.enemy_id for a in tl.actions))
+        # 更新初始费用
+        if mi and tl.initial_cost:
+            mi.initial_cost = tl.initial_cost
+        if mi and tl.runes_desc:
+            mi.runes = [{"desc": tl.runes_desc}]
+        if mi and tl.route_waypoints:
+            mi.route_waypoints = tl.route_waypoints
+        # 路径描述
+        paths_desc = tl.paths_desc
+        log.info("敌人路径:\n%s", paths_desc[:300] if paths_desc else "无")
         log.info("出怪波次:\n%s", wave_desc)
     else:
         log.warning("未找到 level JSON: %s", level_path)
@@ -159,22 +187,40 @@ async def smoke_copilot_doc() -> None:
         enemy_stats_desc = _enemy_desc(enemy_ids, enemy_db_path, handbook_path)
         log.info("敌人属性: %s", enemy_stats_desc)
 
-    log.info("DeepSeek 生成整关作业(model=%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
-    brain = make_copilot_brain()
-    # 拼接完整上下文: 地图 + 波次 + 敌人属性
-    full_context = map_info
-    if wave_desc:
-        full_context += "\n" + wave_desc
-    if enemy_stats_desc:
-        full_context += "\n敌人属性: " + enemy_stats_desc
-    doc = await brain(operators, "1-7", full_context)
+    # 加载干员完整特性
+    from src.data.oper_profile import get_profiles_batch
+    top_names = [o["name"] for o in sorted(
+        operators,
+        key=lambda o: (o.get("elite") or 0, o.get("level") or 0, o.get("rarity") or 0),
+        reverse=True
+    )[:40]]
+    oper_profiles = get_profiles_batch(top_names)
+    log.info("干员特性: %d 个", len(oper_profiles.split("\n")))
+
+    log.info("DeepSeek 多步管道生成整关作业(model=%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+    from src.brain.pipeline import generate_job_pipeline
+
+    # RAG 检索: wiki 攻略 + 专家作业
+    from src.data.rag_retriever import retrieve_context
+    rag_context = retrieve_context(stage, stage_name_for_maa, MAA,
+                                   os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache")))
+    if rag_context:
+        log.info("RAG 检索结果:\n%s", rag_context[:300])
+    else:
+        log.info("RAG: 无检索结果(新关卡,走通用推理)")
+
+    doc = await generate_job_pipeline(
+        operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
+        mi.blue_doors if mi else None,
+        rag_context=rag_context,
+    )
     log.info("作业: stage=%s opers=%d actions=%d", doc.stage_name, len(doc.opers), len(doc.actions))
     job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
     with open(job_path, "w", encoding="utf-8") as f:
         json.dump(doc.to_maa(), f, ensure_ascii=False, indent=2)
     log.info("作业写入 %s", job_path)
 
-    # 后处理:修正方向 + 验证位置 + 类型匹配 + 去重(读 doc.to_maa 而非文件)
+    # 后处理:修正方向 + 验证位置 + 类型匹配 + 去重 + 撤先锋 + 蓝门覆盖
     from src.data.job_post_process import post_process_job
     job_data = doc.to_maa()
     try:
@@ -182,7 +228,9 @@ async def smoke_copilot_doc() -> None:
             job_data = post_process_job(job_data, mi, _db)
             with open(job_path, "w", encoding="utf-8") as f:
                 json.dump(job_data, f, ensure_ascii=False, indent=2)
-            log.info("后处理完成: actions=%d(方向修正+位置/类型验证)", len(job_data.get("actions", [])))
+            deploy_count = len([a for a in job_data.get("actions", []) if a.get("type") == "Deploy"])
+            retreat_count = len([a for a in job_data.get("actions", []) if a.get("type") == "Retreat"])
+            log.info("后处理完成: actions=%d deploys=%d retreats=%d", len(job_data.get("actions", [])), deploy_count, retreat_count)
         else:
             log.warning("无地图信息,跳过后处理")
             with open(job_path, "w", encoding="utf-8") as f:
@@ -193,17 +241,27 @@ async def smoke_copilot_doc() -> None:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
 
     # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA)
-    await _run_maa_copilot(job_path, job_data)
+    await _run_maa_copilot(job_path, job_data, stage)
 
 
-async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
+async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") -> None:
     """MAA Copilot 一体化执行: formation + 开始作战 + actions + 胜负检测。"""
+    import json as _json
     import subprocess as _sp
     import cv2 as _cv2
     import numpy as _np
 
     client = MaapyClient(resource_path=MAA)
     client.add_handler(_ev_printer)
+
+    # 检测 CopilotAction 回调 → 战斗已开始
+    _battle_started = False
+    async def _action_detector(ev):
+        nonlocal _battle_started
+        if ev.msg == 20003 and ev.details.get("what") == "CopilotAction":
+            _battle_started = True
+    client.add_handler(_action_detector)
+
     ok = await client.connect(ADB, ADDR)
     if not ok:
         log.error("connect 失败")
@@ -213,8 +271,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
     await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
     await client.start()
 
-    # 异步监控: 如果 BattleStartAll 20000, ADB tap 开始作战(只 tap 一次)
-    _battle_started = False
+    # 异步监控: 如果 30 秒没进战斗, ADB tap 开始作战(只 tap 一次)
     _adb_tapped = False
     import time as _time
     _start_time = _time.time()
@@ -223,7 +280,11 @@ async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
         await asyncio.sleep(1)
         if not client.running():
             break
-        if not _battle_started and not _adb_tapped and _time.time() - _start_time > 30:
+        # 战斗已开始(MAA在执行actions)就不需要 ADB tap
+        if _battle_started:
+            continue
+        # 30 秒未进战斗, ADB tap 开始作战(只一次,不管成功与否)
+        if not _adb_tapped and _time.time() - _start_time > 30:
             log.info("30 秒未进战斗, ADB tap 开始作战...")
             _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
             if _t is not None:
@@ -240,10 +301,10 @@ async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
                         log.info("  ADB tap 开始作战(%d,%d) score=%.3f", _cx, _cy, _mv)
                         _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
                         _adb_tapped = True
-                        _battle_started = True
                         await asyncio.sleep(5)
                     else:
                         log.info("  未找到开始作战按钮, 等待 MAA 自己处理")
+                        _adb_tapped = True  # 不再重试
 
     await client.wait_done(timeout=300)
     log.info("Copilot 完成")
@@ -254,11 +315,12 @@ async def _run_maa_copilot(job_path: str, job_data: dict) -> None:
         _stars = _detect_battle_result(ADB, ADDR, MAA)
         if _stars > 0:
             log.info("=== 通关! Stars=%d ===", _stars)
+            from src.data.stage_util import get_cache_path
             _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
             os.makedirs(_cache_dir, exist_ok=True)
-            _cache_path = os.path.join(_cache_dir, "main_01-07.json")
+            _cache_path = get_cache_path(_cache_dir, stage, MAA)
             with open(_cache_path, "w", encoding="utf-8") as f:
-                json.dump(job_data, f, ensure_ascii=False, indent=2)
+                _json.dump(job_data, f, ensure_ascii=False, indent=2)
             log.info("作业已缓存: %s", _cache_path)
         elif _stars == 0:
             log.warning("=== 失败(0星), 可能漏怪 ===")
@@ -321,18 +383,10 @@ async def smoke_singlestep(steps: int) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log.info("MAA=%s ADB=%s ADDR=%s", MAA, ADB, ADDR)
     if not os.getenv("DEEPSEEK_API_KEY", ""):
-        log.error("DEEPSEEK_API_KEY 未填,请在 .env 填写")
-        return
-    if not os.getenv("VLM_API_KEY", ""):
-        log.warning("VLM_API_KEY 未填,感知走 fallback(决策盲);建议填通义千问-VL/GPT-4o")
-    log.info("SingleStep 实时决策(截图→VLM→DeepSeek→action)")
-    client = MaapyClient(resource_path=MAA)
-    client.add_handler(_ev_printer)
-    ok = await client.connect(ADB, ADDR)
-    if not ok:
-        log.error("connect 失败")
-        return
-    await game_loop(client, steps=steps)
+        log.warning("DEEPSEEK_API_KEY 未填(本次用缓存作业,不需 LLM)")
+    log.info("SingleStep 实时部署测试 (patched MaaCore.dll + update_deployment)")
+    from src.core.orchestrator import game_loop
+    await game_loop(steps=steps)
 
 
 def _detect_battle_result(adb: str, addr: str, maa: str) -> int:
@@ -384,17 +438,26 @@ def _detect_battle_result(adb: str, addr: str, maa: str) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--copilot", action="store_true", help="SingleStep SpeedUp 验证(不需 key)")
-    ap.add_argument("--llm", action="store_true", help="真实 DeepSeek 决策(需 .env DEEPSEEK_API_KEY + 游戏在 1-7 编队界面)")
+    ap.add_argument("--llm", action="store_true", help="真实 DeepSeek 决策(需 .env DEEPSEEK_API_KEY + 游戏在编队界面)")
+    ap.add_argument("--stage", type=str, default="1-7", help="关卡代码 (如 1-7, 2-1, 3-4)")
+    ap.add_argument("--fresh", action="store_true", help="强制重新生成作业(跳过缓存)")
+    ap.add_argument("--list-stages", action="store_true", help="列出所有可用关卡")
     ap.add_argument("--operbox", action="store_true", help="识别账号全干员列表存 operators.json(需游戏在主菜单)")
-    ap.add_argument("--singlestep", action="store_true", help="SingleStep 实时决策(截图→VLM→DeepSeek→action,需 DEEPSEEK+VLM key + 游戏在 1-7 编队界面)")
-    ap.add_argument("--steps", type=int, default=5)
+    ap.add_argument("--singlestep", action="store_true", help="SingleStep 实时部署测试(patched MaaCore.dll, 需游戏在 1-7 编队界面)")
+    ap.add_argument("--steps", type=int, default=8)
     args = ap.parse_args()
-    if args.operbox:
+    if args.list_stages:
+        from src.data.stage_util import list_available_stages
+        stages = list_available_stages(MAA)
+        print(f"可用主线关卡 ({len(stages)} 个):")
+        for s in stages:
+            print(f"  {s}")
+    elif args.operbox:
         asyncio.run(smoke_operbox())
     elif args.singlestep:
         asyncio.run(smoke_singlestep(args.steps))
     elif args.llm:
-        asyncio.run(smoke_copilot_doc())
+        asyncio.run(smoke_copilot_doc(args.stage, args.fresh))
     elif args.copilot:
         asyncio.run(smoke_copilot(args.steps))
     else:

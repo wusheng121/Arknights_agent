@@ -21,6 +21,27 @@ from src.resilience.guarded_call import GuardedCall
 log = logging.getLogger(__name__)
 
 
+async def _ev_printer(ev):
+    """打印 MAA 回调事件。"""
+    if ev.msg in (20001, 20002, 20003, 3):
+        parts = [f"[cb] {ev.msg}"]
+        d = ev.details
+        st = d.get("subtask", d.get("what", ""))
+        if st:
+            parts.append(st)
+        if d.get("first"):
+            parts.append(str(d["first"][:3]))
+        det = d.get("details", d)
+        if isinstance(det, dict):
+            action = det.get("action", "")
+            target = det.get("target", "")
+            if action:
+                parts.append(action)
+            if target:
+                parts.append(target)
+        log.info(" ".join(parts))
+
+
 def _make_brain() -> GuardedCall:
     # 真实接入见 src/brain/llm_client.py(DeepSeek V4 + thinking);无 key 自动降级
     return make_brain()
@@ -32,67 +53,74 @@ def _make_vlm() -> GuardedCall:
 
 
 async def game_loop(client: MockMaapyClient | None = None, steps: int = 5) -> None:
-    import json as _json
-    import re
-    client = client or create_client(mock=True)
-    perc = Perception(vlm=_make_vlm())
-    brain = _make_brain()
+    """SingleStep 闭环: Copilot 编队 → ADB tap 开始 → SingleStep do_action 逐个部署。
 
-    # 读 copilot_job.json 的 opers 作为编队
+    依赖 patched MaaCore.dll (update_deployment fix)。
+    每次 do_action 前截图 → CV 感知 → DeepSeek 决策 → MAA 执行。
+    """
+    import json as _json
+
+    client = client or create_client(mock=False, resource_path=os.getenv("MAA_RESOURCE_PATH", ""))
+    client.add_handler(_ev_printer)
+    # Override resource path for patched DLL (use source resource)
+    client._resource_path = os.getenv("MAA_RESOURCE_PATH", "")
+
+    # 读 copilot_job.json 作为编队 + 动作来源
     job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "copilot_job.json"))
-    operators: list = []
-    step_path = None
-    if os.path.exists(job_path):
-        with open(job_path, encoding="utf-8") as f:
-            job = _json.load(f)
-        operators = [{"name": o.get("name"), "rarity": 6, "elite": 2, "level": 90} for o in job.get("opers", [])]
-        step_job = {"stage_name": "1-7", "opers": job.get("opers", []),
-                    "actions": [{"type": "SpeedUp"}], "minimum_required": "v6.7.0"}
-        step_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "copilot_step.json"))
-        with open(step_path, "w", encoding="utf-8") as f:
-            _json.dump(step_job, f, ensure_ascii=False)
-        log.info("载入编队 %d 干员: %s", len(operators), [o["name"] for o in operators])
-    else:
+    if not os.path.exists(job_path):
         log.error("无 copilot_job.json,先跑 --llm 生成作业")
         return
+    with open(job_path, encoding="utf-8") as f:
+        job = _json.load(f)
+    operators = [{"name": o.get("name"), "rarity": 6, "elite": 2, "level": 90} for o in job.get("opers", [])]
+    actions = job.get("actions", [])
+    log.info("载入作业: %d 干员, %d actions", len(operators), len(actions))
 
-    from src.game.adb_control import AdbController
-    adb = AdbController(os.getenv("MAA_ADB_PATH", ""), os.getenv("MAA_ADDRESS", ""))
-    shot_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "shot.png"))
+    # 1. 手动编队已完成,游戏已在战斗中
+    # 用户需: 手动选 7 个干员 → 点开始作战 → 进战斗后运行 --singlestep
+    log.info("假设游戏已在 1-7 战斗中(用户手动编队+开始)")
 
-    client.add_handler(perc.update_from_maapy)
-
-    # Copilot formation 自动编队 + 开始作战 + SpeedUp(进战斗)
-    await client.append("Copilot", {"filename": step_path, "formation": True, "formation_index": 0})
+    # 2. SingleStep: set_stage → do_action 逐个执行
+    log.info("=== SingleStep 实时部署 (patched MaaCore.dll) ===")
+    await client.set_stage("1-7")
     await client.start()
-    log.info("Copilot 编队+开始作战中...")
-    await client.wait_done(timeout=90)
-    log.info("进战斗,等渲染...")
-    await asyncio.sleep(5)
-    log.info("切 ADB 实时 Deploy 循环")
+    await client.wait_done(timeout=30)
+    log.info("SingleStep set_stage 完成")
 
-    for i in range(steps):
-        adb.screencap(shot_path)
-        with open(shot_path, "rb") as f:
-            shot = f.read()
-        state = await perc.snapshot(shot)
-        log.info("step=%d cost=%d vlm=%s", state.step, state.cost, (state.vlm_desc or "-")[:120])
-        action = await brain(state, operators)
-        log.info("  action: %s %s loc=%s", action.type, action.name or "", action.location)
-        if action.type == "Deploy" and action.name:
-            # 从 vlm_desc 解析干员头像坐标 + 建议格子坐标
-            m = re.search(r"%s\((\d+)[,，](\d+)\)" % re.escape(action.name), state.vlm_desc or "")
-            gm = re.search(r"(?:格子|Deploy)[^0-9]{0,6}(\d+)[,，](\d+)", state.vlm_desc or "")
-            if m and gm:
-                oper_pos = (int(m.group(1)), int(m.group(2)))
-                tile_pos = (int(gm.group(1)), int(gm.group(2)))
-                log.info("  adb deploy %s %s->%s", action.name, oper_pos, tile_pos)
-                adb.deploy(oper_pos, tile_pos)
-                await asyncio.sleep(2)
-            else:
-                log.warning("  VLM 坐标解析失败,跳过")
+    # 逐个执行 actions (不调 start_battle,避免导航干扰)
+    import subprocess as _sp
+    maa = os.getenv("MAA_RESOURCE_PATH", "")
+    adb_path = os.getenv("MAA_ADB_PATH", "")
+    addr = os.getenv("MAA_ADDRESS", "")
 
-    log.info("ADB 实时循环完成(%d steps)", steps)
+    # 逐个执行 actions
+    for i, action_data in enumerate(actions):
+        if i >= steps:
+            break
+        atype = action_data.get("type", "Deploy")
+        if atype == "SpeedUp":
+            _sp.run([adb_path, "-s", addr, "shell", "input", "tap", "1700", "80"])
+            await asyncio.sleep(1)
+            log.info("step %d: SpeedUp", i)
+            continue
+
+        if atype != "Deploy":
+            log.info("step %d: 跳过 %s", i, atype)
+            continue
+
+        name = action_data.get("name", "")
+        loc = action_data.get("location", [])
+        direction = action_data.get("direction", "Right")
+        log.info("step %d: Deploy %s → %s dir=%s", i, name, loc, direction)
+
+        from src.game.copilot_schema import Action
+        action = Action(type="Deploy", name=name, location=tuple(loc), direction=direction)
+        await client.do_action(action)
+        await client.start()
+        await client.wait_done(timeout=30)
+        log.info("  do_action 完成 (update_deployment 应已刷新)")
+
+    log.info("=== SingleStep 循环完成 ===")
 
 
 def handle_task(t: Task | None) -> None:

@@ -34,6 +34,14 @@ class WaveTimeline:
     """整关出怪时间线。"""
     actions: list[SpawnAction] = field(default_factory=list)
     stage_name: str = ""
+    initial_cost: int = 10
+    runes_desc: str = ""
+    paths_desc: str = ""
+    route_waypoints: list[list[tuple[int, int]]] = None
+
+    def __post_init__(self):
+        if self.route_waypoints is None:
+            self.route_waypoints = []
 
     def to_description(self) -> str:
         """转紧凑文本(给 DeepSeek 喂)。"""
@@ -72,12 +80,35 @@ def parse_level_json(
 
     routes = level.get("routes", [])
     waves = level.get("waves", [])
+    options = level.get("options", {})
+    initial_cost = int(options.get("initialCost", 10) or 10)
+
+    # 解析地图机制 (runes)
+    runes = level.get("runes", [])
+    runes_desc = ""
+    if runes:
+        rune_list = []
+        for r in runes:
+            key = r.get("key", "")
+            blackboard = r.get("blackboard", {})
+            if isinstance(blackboard, dict):
+                attrs = {k: v for k, v in blackboard.items() if k in ("atk", "def", "max_hp", "move_speed", "atk_scale", "cost_recovery_multiplier")}
+                if attrs:
+                    rune_list.append(f"{key}:{attrs}")
+            elif isinstance(blackboard, list):
+                parts = [f"{b.get('key','')}={b.get('value','')}" for b in blackboard if b.get('key')]
+                if parts:
+                    rune_list.append(f"{key}:{','.join(parts)}")
+        if rune_list:
+            runes_desc = "; ".join(rune_list)
 
     name_map = _load_enemy_names(handbook_path)
     enemy_stats = _load_enemy_stats(enemy_db_path)
 
     timeline = WaveTimeline(
-        stage_name=level.get("levelId", "")
+        stage_name=level.get("levelId", ""),
+        initial_cost=initial_cost,
+        runes_desc=runes_desc,
     )
 
     for wave in waves:
@@ -106,9 +137,73 @@ def parse_level_json(
                     route_desc=route_desc,
                 )
                 timeline.actions.append(sa)
-
     timeline.actions.sort(key=lambda a: a.time)
+
+    # 解析敌人路径 (routes 的 MOVE checkpoints)
+    timeline.paths_desc = _parse_paths(routes)
+    # 同时提取原始坐标列表(给后处理用)
+    timeline.route_waypoints = _extract_waypoints(routes)
+
     return timeline
+
+
+def _extract_waypoints(routes: list) -> list[list[tuple[int, int]]]:
+    """提取每条路径的坐标列表 [(col,row), ...]。"""
+    result = []
+    for r in routes:
+        sp = r.get("startPosition", {})
+        ep = r.get("endPosition", {})
+        sr, sc = sp.get("row"), sp.get("col")
+        if sr is None or sc is None:
+            continue
+        waypoints = [(sc, sr)]
+        for cp in (r.get("checkpoints") or []):
+            if cp.get("type") == "MOVE":
+                pos = cp.get("position", {})
+                wc, wr = pos.get("col"), pos.get("row")
+                if wc is not None and wr is not None:
+                    waypoints.append((wc, wr))
+        er, ec = ep.get("row"), ep.get("col")
+        if er is not None and ec is not None:
+            waypoints.append((ec, er))
+        # 去重
+        deduped = [waypoints[0]]
+        for wp in waypoints[1:]:
+            if wp != deduped[-1]:
+                deduped.append(wp)
+        result.append(deduped)
+    return result
+
+
+def _parse_paths(routes: list) -> str:
+    """解析 routes → 紧凑路径描述。"""
+    if not routes:
+        return ""
+    paths = []
+    for i, r in enumerate(routes):
+        sp = r.get("startPosition", {})
+        ep = r.get("endPosition", {})
+        sr, sc = sp.get("row"), sp.get("col")
+        er, ec = ep.get("row"), ep.get("col")
+        if sr is None or sc is None:
+            continue
+        # 提取 MOVE 检查点
+        waypoints = [(sc, sr)]
+        for cp in (r.get("checkpoints") or []):
+            if cp.get("type") == "MOVE":
+                pos = cp.get("position", {})
+                wc, wr = pos.get("col"), pos.get("row")
+                if wc is not None and wr is not None:
+                    waypoints.append((wc, wr))
+        if er is not None and ec is not None:
+            waypoints.append((ec, er))
+        # 去重连续相同点
+        deduped = [waypoints[0]]
+        for wp in waypoints[1:]:
+            if wp != deduped[-1]:
+                deduped.append(wp)
+        paths.append("路径%d: %s" % (i, "→".join("(%d,%d)" % (c, r2) for c, r2 in deduped)))
+    return "\n".join(paths)
 
 
 def _describe_route(idx: int, routes: list) -> str:
