@@ -71,8 +71,14 @@ def to_compact_description(enemy_ids: list[str], db_path: str = "", handbook_pat
         seen.add(eid)
         info = lookup_enemy(eid, db_path, handbook_path)
         if info and info.name:
-            parts.append("%s: HP%d ATK%d DEF%d RES%d" % (
-                info.name, info.hp, info.atk, info.defense, int(info.res)))
+            extras = []
+            if info.move_speed:
+                extras.append("移速%.1f" % info.move_speed)
+            if info.mass_level:
+                extras.append("重量%d" % info.mass_level)
+            extra_str = " " + " ".join(extras) if extras else ""
+            parts.append("%s: HP%d ATK%d DEF%d RES%d%s" % (
+                info.name, info.hp, info.atk, info.defense, int(info.res), extra_str))
     return " | ".join(parts)
 
 
