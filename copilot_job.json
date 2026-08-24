@@ -1,0 +1,140 @@
+{
+  "stage_name": "1-7",
+  "opers": [
+    {
+      "name": "伊内丝",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "桃金娘",
+      "skill": 1,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "维什戴尔",
+      "skill": 2,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "逻各斯",
+      "skill": 2,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "澄闪",
+      "skill": 2,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "乌尔比安",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "塞雷娅",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "夜莺",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    }
+  ],
+  "groups": [],
+  "actions": [
+    {
+      "type": "SpeedUp"
+    },
+    {
+      "type": "Deploy",
+      "name": "桃金娘",
+      "location": [
+        4,
+        3
+      ],
+      "direction": "Right",
+      "costs": 8
+    },
+    {
+      "type": "Deploy",
+      "name": "伊内丝",
+      "location": [
+        6,
+        3
+      ],
+      "direction": "Right",
+      "costs": 12
+    },
+    {
+      "type": "Deploy",
+      "name": "维什戴尔",
+      "location": [
+        2,
+        1
+      ],
+      "direction": "Right",
+      "costs": 20
+    },
+    {
+      "type": "Deploy",
+      "name": "逻各斯",
+      "location": [
+        5,
+        2
+      ],
+      "direction": "Right",
+      "costs": 22
+    },
+    {
+      "type": "Deploy",
+      "name": "乌尔比安",
+      "location": [
+        4,
+        1
+      ],
+      "direction": "Right",
+      "costs": 26
+    },
+    {
+      "type": "Deploy",
+      "name": "澄闪",
+      "location": [
+        2,
+        5
+      ],
+      "direction": "Right",
+      "costs": 28
+    },
+    {
+      "type": "Deploy",
+      "name": "塞雷娅",
+      "location": [
+        4,
+        5
+      ],
+      "direction": "Right",
+      "costs": 32
+    },
+    {
+      "type": "Deploy",
+      "name": "夜莺",
+      "location": [
+        1,
+        2
+      ],
+      "direction": "Right",
+      "costs": 35
+    }
+  ],
+  "minimum_required": "v6.7.0"
+}
