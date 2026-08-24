@@ -38,3 +38,10 @@ data/
 
 # Digit templates (regenerable)
 digit_templates/
+
+# Game data (downloaded separately)
+data/
+# Job cache (regenerable)
+job_cache/
+# Debug
+debug/
