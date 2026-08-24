@@ -119,9 +119,39 @@ async def smoke_copilot_doc() -> None:
     _db = _ODB()
     _db.load_from_maa()
     _db.load_cost_from_file("cost.json")
+
+    # 加载出怪波次 + 敌人属性
+    from src.data.wave_parser import parse_level_json
+    from src.data.enemy_lookup import to_compact_description as _enemy_desc
+    gamedata = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "gamedata"))
+    level_path = os.path.join(gamedata, "levels", "obt", "main", "level_main_01-07.json")
+    handbook_path = os.path.join(gamedata, "excel", "enemy_handbook_table.json")
+    enemy_db_path = os.path.join(gamedata, "levels", "enemydata", "enemy_database.json")
+    wave_desc = ""
+    enemy_ids = []
+    if os.path.exists(level_path):
+        tl = parse_level_json(level_path, handbook_path, enemy_db_path)
+        wave_desc = tl.to_description()
+        enemy_ids = list(set(a.enemy_id for a in tl.actions))
+        log.info("出怪波次:\n%s", wave_desc)
+    else:
+        log.warning("未找到 level JSON: %s", level_path)
+
+    # 加载敌人属性
+    enemy_stats_desc = ""
+    if enemy_ids:
+        enemy_stats_desc = _enemy_desc(enemy_ids, enemy_db_path, handbook_path)
+        log.info("敌人属性: %s", enemy_stats_desc)
+
     log.info("DeepSeek 生成整关作业(model=%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
     brain = make_copilot_brain()
-    doc = await brain(operators, "1-7", map_info)
+    # 拼接完整上下文: 地图 + 波次 + 敌人属性
+    full_context = map_info
+    if wave_desc:
+        full_context += "\n" + wave_desc
+    if enemy_stats_desc:
+        full_context += "\n敌人属性: " + enemy_stats_desc
+    doc = await brain(operators, "1-7", full_context)
     log.info("作业: stage=%s opers=%d actions=%d", doc.stage_name, len(doc.opers), len(doc.actions))
     job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
     with open(job_path, "w", encoding="utf-8") as f:
@@ -199,6 +229,26 @@ async def smoke_copilot_doc() -> None:
     await client.wait_done(timeout=300)
     log.info("Copilot 完成")
 
+    # 胜负检测: 截图匹配 Stars 模板
+    await asyncio.sleep(3)
+    try:
+        _stars = _detect_battle_result(ADB, ADDR, MAA)
+        if _stars > 0:
+            log.info("=== 通关! Stars=%d ===", _stars)
+            # 缓存通关作业
+            _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
+            os.makedirs(_cache_dir, exist_ok=True)
+            _cache_path = os.path.join(_cache_dir, "main_01-07.json")
+            with open(_cache_path, "w", encoding="utf-8") as f:
+                json.dump(job_data, f, ensure_ascii=False, indent=2)
+            log.info("作业已缓存: %s", _cache_path)
+        elif _stars == 0:
+            log.warning("=== 失败(0星), 可能漏怪 ===")
+        else:
+            log.info("=== 无法判断胜负(可能未结算) ===")
+    except Exception as e:
+        log.error("胜负检测失败: %s", e)
+
 
 async def smoke_operbox() -> None:
     import json
@@ -265,6 +315,52 @@ async def smoke_singlestep(steps: int) -> None:
         log.error("connect 失败")
         return
     await game_loop(client, steps=steps)
+
+
+def _detect_battle_result(adb: str, addr: str, maa: str) -> int:
+    """截图检测战斗结果: 0=失败, 2=2星, 3=3星, -1=无法判断。"""
+    import subprocess as sp
+    import cv2
+    import numpy as np
+
+    r = sp.run([adb, "-s", addr, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+    arr = np.frombuffer(r.stdout, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return -1
+
+    scale = 1.5  # MAA 基准 1280x720 → 1920x1080
+    best_stars = 0
+    best_score = 0.0
+
+    for stars, name in [(3, "StageDrops-Stars-3"), (2, "StageDrops-Stars-2")]:
+        path = os.path.join(maa, "resource", "template", "Battle", "StageDrops", name + ".png")
+        if not os.path.exists(path):
+            continue
+        templ = cv2.imread(path)
+        if templ is None:
+            continue
+        templ_s = cv2.resize(templ, (int(templ.shape[1] * scale), int(templ.shape[0] * scale)))
+        res = cv2.matchTemplate(img, templ_s, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        if max_val > 0.8 and max_val > best_score:
+            best_stars = stars
+            best_score = max_val
+
+    # 失败检测
+    fail_path = os.path.join(maa, "resource", "template", "Battle", "StageDrops", "MissionFailedFlag.png")
+    if not os.path.exists(fail_path):
+        fail_path = os.path.join(maa, "resource", "template", "Roguelike", "MissionFailedFlag.png")
+    if os.path.exists(fail_path):
+        templ = cv2.imread(fail_path)
+        if templ is not None:
+            templ_s = cv2.resize(templ, (int(templ.shape[1] * scale), int(templ.shape[0] * scale)))
+            res = cv2.matchTemplate(img, templ_s, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            if max_val > 0.8:
+                return 0
+
+    return best_stars if best_stars > 0 else -1
 
 
 def main() -> None:

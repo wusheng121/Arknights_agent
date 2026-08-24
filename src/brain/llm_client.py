@@ -116,7 +116,7 @@ def make_brain(
     return GuardedCall("llm", primary, fallback, timeout=12.0, retries=1, fail_threshold=3, cool=60.0)
 
 
-SYSTEM_PROMPT_COPILOT = """你是明日方舟 AI 主播的战斗决策模块。给定地图信息、可用干员列表,输出整关作业 JSON,须严格符合 MAA copilot-schema:
+SYSTEM_PROMPT_COPILOT = """你是明日方舟 AI 主播的战斗决策模块。给定地图信息、出怪波次、敌人属性、可用干员列表,输出整关作业 JSON,须严格符合 MAA copilot-schema:
 {"stage_name":<关卡>,"opers":[{"name":<干员名>,"skill":<1-3>,"skill_usage":<0-3>}],"actions":[{"type":"Deploy"|"Skill"|"Retreat"|"SpeedUp","name":<干员名>,"location":[x,y],"direction":"Left"|"Right"|"Up"|"Down"|"None","kills":<int>,"costs":<int>}],"minimum_required":"v6.7.0"}
 规则:
 - 只能使用「可用干员列表」里的干员,禁止编造不在列表的干员。
@@ -125,18 +125,29 @@ SYSTEM_PROMPT_COPILOT = """你是明日方舟 AI 主播的战斗决策模块。�
 
 - 地图分析(关键!):
   - 1-7 有三个红门(敌人来路),分别在右上(10,1)、右中(10,3)、右下(10,5)。
-  - 蓝门在左中(0,3)。敌人从右侧三路向左走到蓝门。
+  - 蓝门在左中(0,3)。敌人从右侧三路向左走到蓝门,多路汇合到中路。
   - 必须守住三条路!上路(row1)、中路(row3)、下路(row5)都要放干员。
   - 每条路至少放 1 个地面干员(阻挡)+ 1 个输出(高台或地面)。
   - 不要把所有干员集中在一条路!
-  - 部署顺序:先下先锋(低费)回费,再按出怪顺序部署(哪路先出怪先守哪路)。
+
+- 出怪时序(关键!):
+  - 根据「出怪波次」决定部署顺序!哪路先出怪就先守哪路。
+  - 早期(T+6s~T+10s)上下路都有源石虫/暴徒/鸡尾酒投掷者,需要尽快部署先锋阻挡。
+  - 中期(T+11s~T+15s)士兵和拾荒者从中路来,需要部署输出。
+  - 后期(T+18s~T+31s)大量源石虫从中路涌来,需要足够输出。
+  - 使用 costs 条件控制部署时机(costs=N 表示费用到 N 时部署)。
+
+- Retreat + 二次部署:
+  - 可以先 Deploy 干员,战斗中 Retreat(撤退),再 Deploy 同名干员(二次部署)。
+  - 示例:先锋 Deploy 回费 → Retreat → Deploy 输出(腾出位置和费用)。
+  - 史尔特尔/银灰等可空降切后排 → Retreat 撤退。
+  - Retreat 后 redeploy 同名干员,MAA 会从待部署区重新拖拽。
 
 - 部署位置规则:
   - 地面职业(Pioneer/Warrior/Tank/Special)只能放「地面可部署」格子。
   - 高台职业(Sniper/Caster/Medic/Support)只能放「高台可部署」格子。
   - 坐标从 0 开始(row 0~6, col 0~10)。
   - direction 朝 Right(敌人从右来)。
-  - 加 costs 条件(如 costs=8 表示费用到 8 时才部署)。
 
 - 三路部署示例:
   - 上路(row1): 地面(4,1)(5,1)..., 高台(1,1)(2,1)(3,1)
@@ -148,6 +159,7 @@ SYSTEM_PROMPT_COPILOT = """你是明日方舟 AI 主播的战斗决策模块。�
   2. skill_usage=1(自动开技能)。
   3. 先下先锋回费,再按出怪顺序部署三路,最后医疗。
   4. Deploy 必填 name/location/direction,加 costs 条件。
+  5. 可在关键干员部署后加 Retreat + redeploy。
 
 - 只输出 JSON 对象,不要解释或代码块。"""
 
@@ -218,6 +230,7 @@ def make_copilot_brain(
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
+            temperature=0,
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = resp.choices[0].message

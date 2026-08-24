@@ -3,8 +3,15 @@
 ## 当前状态
 
 - **L1 已验证**: 1-7 通关成功 (DeepSeek 生成作业 + MAA Copilot 一体化执行)
-- **架构**: MAA Copilot 开环模式 (DeepSeek 生成作业 → 后处理 → MAA 盲执行)
-- **核心瓶颈**: DeepSeek 缺乏游戏知识 (出怪时序/干员技能/敌人属性)
+- **L2 已验证**: 知识库建设完成,1-7 无漏通关
+  - 出怪波次解析 (wave_parser.py)
+  - 干员技能提取 (skill_extractor.py)
+  - 敌人属性查询 (enemy_lookup.py)
+  - prompt 升级 (波次时序 + Retreat 机制 + temperature=0)
+  - 作业缓存 (job_cache/main_01-07.json)
+- **L3 胜负检测**: 已实现 (_detect_battle_result, Stars 模板匹配)
+- **架构**: MAA Copilot 开环模式 (DeepSeek 生成作业 → 后处理 → MAA 盲执行 → 胜负检测)
+- **SingleStep patch**: 3 行代码改完即可 (update_deployment(false)),需重编译 MaaCore.dll
 
 ---
 
