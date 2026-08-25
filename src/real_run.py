@@ -269,7 +269,8 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             expert_json = json.load(f)
         job_data = expert_json
         job_data["stage_name"] = stage_name_for_maa
-        # 保留 requirements (MAA 会检查,但我们已经预检过了)
+        # 注意: groups 不解析,让 MAA 自己从组里选能识别的干员
+        # (MAA 可能无法识别较新干员,保留组让 MAA 回退到其他候选)
         job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
