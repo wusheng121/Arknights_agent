@@ -24,57 +24,92 @@ ROLE_TO_DEPLOY = {
 
 
 def post_process_job(job: dict, map_info: MapInfo, db: OperDatabase, has_expert: bool = False) -> dict:
-    """后处理作业 JSON:修正方向 + 验证位置 + 类型匹配 + 去重。"""
+    """后处理: 仅做合法性校验(位置在可部署列表+类型匹配+去重)。
+    
+    不做方向计算/蓝门覆盖/撤先锋等战术决策——这些由 LLM 或专家作业决定。
+    只确保 MAA 能执行(不崩)。
+    """
     actions = job.get("actions", [])
     opers = job.get("opers", [])
 
-    # 0. 过滤不适合站场的干员类型 (仅无专家参考时)
-    if not has_expert:
-        from src.data.oper_profile import _load_char_table, _detect_combat_role
-        char_data = _load_char_table()
-        skill_data = None
-        try:
-            from src.data.oper_profile import _load_skill_table
-            skill_data = _load_skill_table()
-        except Exception:
-            pass
-        filtered_opers = []
-        for o in opers:
-            name = o.get("name", "")
-            if not name:
-                continue
-            prof = ""
-            sub = ""
-            char_entry = None
+    # 1. 位置合法性校验: 必须在可部署列表内,类型匹配
+    melee_set = set(map_info.melee_tiles)
+    ranged_set = set(map_info.ranged_tiles)
+    used_tiles = set()
+    valid_actions = []
+    from src.data.oper_profile import _load_char_table
+    char_data = _load_char_table()
+
+    for action in actions:
+        if action.get("type") != "Deploy":
+            valid_actions.append(action)
+            continue
+        name = action.get("name", "")
+        loc = action.get("location", [])
+        if len(loc) < 2:
+            continue
+        col, row = int(loc[0]), int(loc[1])
+        tile = (col, row)
+
+        # 找干员部署类型
+        deploy_type = ""
+        oper = db.find_oper(name)
+        if oper:
+            deploy_type = ROLE_TO_DEPLOY.get(oper.role, "")
+        if not deploy_type:
             for k, v in char_data.items():
                 if v.get("name") == name:
-                    prof = v.get("profession", "")
-                    sub = v.get("subProfessionId", "")
-                    char_entry = v
+                    deploy_type = "Melee" if v.get("position") == "MELEE" else "Ranged"
                     break
-            if prof and sub and char_entry:
-                trait = char_entry.get("trait", {})
-                trait_desc = ""
-                if isinstance(trait, dict):
-                    cands = trait.get("candidates", [])
-                    if cands:
-                        trait_desc = cands[-1].get("description", "")
-                role = _detect_combat_role(prof, sub, char_entry.get("skills", []), skill_data or {}, char_entry.get("tagList", []), trait_desc)
-                if role in ("utility", "burst_only"):
-                    continue
-            filtered_opers.append(o)
-        job["opers"] = filtered_opers
-        opers = filtered_opers
 
-    # 1. 方向: 根据敌人路径自动计算每个位置朝向
-    for action in actions:
-        if action.get("type") == "Deploy" and action.get("location"):
-            loc = action.get("location")
-            if isinstance(loc, (list, tuple)) and len(loc) >= 2:
-                pos = (int(loc[0]), int(loc[1]))
-                auto_dir = _calc_direction_from_paths(pos, map_info)
-                if auto_dir:
-                    action["direction"] = auto_dir
+        # 如果位置不在可部署列表,找最近的同类型格子
+        if tile not in melee_set and tile not in ranged_set:
+            target_set = melee_set if deploy_type == "Melee" else ranged_set
+            new_tile = _find_nearest(tile, target_set, used_tiles)
+            if new_tile is None:
+                continue
+            tile = new_tile
+            action["location"] = [tile[0], tile[1]]
+        elif deploy_type == "Melee" and tile not in melee_set:
+            new_tile = _find_nearest(tile, melee_set, used_tiles)
+            if new_tile is None:
+                continue
+            tile = new_tile
+            action["location"] = [tile[0], tile[1]]
+        elif deploy_type == "Ranged" and tile not in ranged_set:
+            new_tile = _find_nearest(tile, ranged_set, used_tiles)
+            if new_tile is None:
+                continue
+            tile = new_tile
+            action["location"] = [tile[0], tile[1]]
+
+        # 去重
+        if tile in used_tiles:
+            target_set = melee_set if deploy_type == "Melee" else ranged_set
+            new_tile = _find_nearest(tile, target_set, used_tiles)
+            if new_tile is None:
+                continue
+            tile = new_tile
+            action["location"] = [tile[0], tile[1]]
+
+        used_tiles.add(tile)
+        valid_actions.append(action)
+
+    # 2. 补充 costs 条件(用真实费用)
+    for action in valid_actions:
+        if action.get("type") == "Deploy":
+            name = action.get("name", "")
+            real_cost = _get_real_cost(name, char_data, db)
+            action["costs"] = real_cost
+        elif action.get("type") == "SpeedUp":
+            action["costs"] = 0
+
+    job["actions"] = valid_actions
+    return job
+
+    # 后处理已完成 (仅合法性校验)
+    job["actions"] = valid_actions
+    return job
 
     # 2. 验证位置 + 类型 + 去重
     melee_set = set(map_info.melee_tiles)

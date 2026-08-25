@@ -198,6 +198,14 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     oper_profiles = get_profiles_batch(top_names)
     log.info("干员特性: %d 个", len(oper_profiles.split("\n")))
 
+    # 加载策略知识库
+    strategy_knowledge = ""
+    pattern_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "patterns", "strategy_knowledge.txt"))
+    if os.path.exists(pattern_path):
+        with open(pattern_path, encoding="utf-8") as f:
+            strategy_knowledge = f.read()
+        log.info("策略知识库: %d chars", len(strategy_knowledge))
+
     # RAG 检索: wiki 攻略 + 专家作业
     from src.data.rag_retriever import retrieve_context
     from src.data.rag_jobs import search_expert_jobs_by_stage
@@ -283,6 +291,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
             mi.blue_doors if mi else None,
             rag_context=rag_context,
+            strategy_knowledge=strategy_knowledge,
         )
         job_data = doc.to_maa()
         job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
@@ -297,6 +306,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
             mi.blue_doors if mi else None,
             rag_context=rag_context,
+            strategy_knowledge=strategy_knowledge,
         )
         job_data = doc.to_maa()
         job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))

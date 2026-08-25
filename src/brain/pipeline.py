@@ -15,77 +15,72 @@ from typing import Any
 from src.game.copilot_schema import Action, CopilotDoc, OperSpec
 
 
-PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图信息、出怪波次和可选的专家参考,从可用干员中选出 10-12 个组成编队。
+PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图、波次、敌人、专家参考、策略知识和可用干员,选编队。
 
-**如果提供了 expert_reference(专家攻略/作业),必须优先使用其中的干员组合!**
-- 专家作业的干员组合是已验证可通关的,不要自己换
-- 只有当专家作业中的干员用户没有时,才选相似角色替代
-- 替代规则:银灰→拉普兰德,塞雷娅→星熊/黍,维什戴尔→澄闪(同为高台输出)
+**学习而非照抄:**
+- 如果有 expert_reference: 理解专家选这些干员的原因(角色搭配/费用节奏/应对敌人),适配用户可用干员
+- 如果有 strategy_knowledge: 参考统计规律(哪些干员最常用、团队人数分布)
+- 如果两者都没有: 根据敌人属性和地图信息自行推理
+- 专家用低星干员通关,用户有高星干员 → 可以选更好的,但要理解专家为什么选那些干员(费用低/角色互补)
 
-选择原则:
-- 2 个先锋(回费):执旗手或冲锋手,低费优先(cost≤14)
-- 4-6 个输出:优先 [lane_holder] 站场型,攻击范围大的优先
-- **[burst_only] 和 [utility] 型禁止选!** (玛恩纳/史尔特尔/砾等不适合站场)
-- 1 个重装 [tank] 阻挡3
-- 1-2 个医疗 [support]
-- 高防敌人用法术,低防用物理
+**输入字段说明:**
+- map: 地图信息(红蓝门/可部署格子/敌人方向/战术建议)
+- waves: 出怪波次(时间/敌人/路线)
+- enemies: 敌人属性(HP/ATK/DEF/RES)
+- expert_reference: 专家作业参考(干员选择/位置/技能/操作序列)
+- strategy_knowledge: 1365份作业的统计规律
+- available_operators: 用户可用干员(角色/阻挡/费用/范围/天赋/技能)
 
 只输出 JSON: {"selected":[{"name":"干员名"}]}
 """
 
-PROMPT_STEP2_POSITION = """你是明日方舟战术规划师。给定选中干员特性、地图格子和敌人路径,为每个干员分配位置和朝向。
+PROMPT_STEP2_POSITION = """你是明日方舟战术规划师。根据地图、敌人路径、干员特性和专家位置参考,分配位置和朝向。
 
-**蓝门防守原则:**
-- 数一下地图有几个蓝门,每个蓝门 3 格内必须有 1 个地面阻挡(近卫/重装)。
-- 不要在同一个路径(同一行)放两个地面阻挡!分散到不同行/不同蓝门。
+**学习而非照抄:**
+- 如果有 expert_positions: 理解专家为什么放在那个位置(攻击范围覆盖哪条路径?),根据用户干员的攻击范围调整
+- 如果没有: 根据敌人路径和干员攻击范围自行推理最佳位置
+- 核心推理: "这个干员的攻击范围从这里能覆盖几条敌人路径?"
 
-**高台分布原则:**
-- 高台干员不要全放一边!左右两侧都要有高台覆盖敌人路径。
-- 看敌人路径,高台放能覆盖最多路径格子的位置。
+**输入字段说明:**
+- map: 地图格子(地面/高台可部署) + 红蓝门 + 战术建议
+- enemy_paths: 敌人移动路径(坐标序列,从红门到蓝门)
+- operators: 每个干员的角色/阻挡数/费用/攻击范围大小
+- expert_positions: 专家作业的位置和方向(如果有)
 
-**干员位置原则:**
-- 阻挡位(近卫/重装 阻挡≥2):放蓝门附近地面格子,每个蓝门一个,不要重复。
-- 输出位(高台):放能覆盖多条敌人路径的位置,左右分散。
-- 先锋:放能打到敌人的位置(情报官特性是攻击回费,必须能打到怪才有用!)。
-- 医疗:放后排,覆盖己方干员。
-
-**朝向原则:**
-- 看干员所在位置的敌人路径走向,朝向覆盖最多路径格子的方向。
-- 不同位置方向可能不同,不要统一方向。
-
-地面职业只能放「地面可部署」,高台职业只能放「高台可部署」。同一格子不能放两个。
+地面职业只能放地面格子,高台职业只能放高台格子。同一格子不能放两个。
 
 只输出 JSON: {"positions":[{"name":"干员名","location":[x,y],"direction":"Right"}]}
 """
 
-PROMPT_STEP3_SKILL = """你是明日方舟技能专家。根据干员的技能描述和战斗角色,选择最合适的技能编号。
+PROMPT_STEP3_SKILL = """你是明日方舟技能专家。根据干员技能描述、敌人属性和策略知识,选技能。
 
-**技能选择依据(按优先级):**
-1. 先锋(执旗手):选CD最短的纯回费技能(通常是技能1)。不要选有附加效果(如治疗)的技能,因为CD更长。
-2. 先锋(情报官):选能攻击回费的技能(看描述含"获得...部署费用"且需要攻击)。
-3. 站场输出:选持续时间最长的持续输出技能(非一次性爆发)。
-4. 重装:选生存/防御技能(看描述含"防御力+"或"每秒回复")。
-5. 医疗:选持续治疗技能(如夜莺技能2法术护盾,不要选技能3圣域因为CD太长)。
-6. burst_only 型:选爆发最高的技能。
+**学习而非照抄:**
+- 如果有 strategy_knowledge: 参考统计规律(如"圣聆初雪常用skill2, 246/251次")
+- 如果没有: 根据技能描述和敌人属性推理(高防用法术技能,低防用物理技能)
+- 理解技能描述的关键词: "回复...部署费用"=回费, "攻击力+"=增伤, "防御力+"=生存, "持续X秒"=持续时间
+- skill_usage=1 表示自动开技能
 
-skill_usage=1 会自动开技能。有"逐渐流失生命"/"强制退出"的技能会自动触发撤退。
+**输入字段说明:**
+- enemies: 敌人属性(HP/ATK/DEF/RES)
+- operators: 每个干员的技能描述(name/CD/持续时间/效果关键词)
+- strategy_knowledge: 统计规律(哪个干员常用几技能)
 
 只输出 JSON: {"skills":[{"name":"干员名","skill":1,"skill_usage":1}]}
 """
 
-PROMPT_STEP4_ORDER = """你是明日方舟部署调度员。根据干员的位置、费用、类型和出怪波次,确定部署顺序。
+PROMPT_STEP4_ORDER = """你是明日方舟部署调度员。根据干员位置、费用、出怪波次和专家参考,确定部署顺序。
 
-**最重要的原则: 平衡各蓝门防守 + 阻挡优先!**
-- 看每个干员的位置和 defends_blue_door,确定他守哪个蓝门。
-- **不要把同一个蓝门的干员连续部署!** 交替部署不同蓝门的干员。
-- **每个蓝门先下地面阻挡位(近卫/重装/先锋),再下高台输出!** 阻挡位防漏怪,输出位打伤害。
-- 先下低费(cost≤14)干员,确保每个蓝门都有人守,再补充高费输出。
-- 如果出怪从 T+0 就开始,立刻部署低费干员守各路。
-- costs 条件 = 该干员的部署费用。
-- **部署位不够时,加 Retreat action 撤掉先锋(已完成回费),腾位给阻挡/输出。**
+**学习而非照抄:**
+- 如果有 expert_reference: 参考专家的操作序列(谁先下/谁后下/何时撤退/何时开技能)
+- 如果没有: 根据费用和波次推理(低费先下回费,高费等费用够了再下,哪路先出怪先守)
+- 如果部署位可能不够,可以加 Retreat action 撤退已用完的干员
+- 如果需要开技能,加 Skill action (带 kills 条件)
+- 最后可以加 SkillDaemon 自动挂机
 
-部署顺序示例(3个蓝门):
-SpeedUp → Deploy先锋A(蓝门1,cost10) → Deploy先锋B(蓝门2,cost10) → Deploy阻挡C(蓝门3,cost13) → Deploy阻挡D(蓝门1,cost16) → Deploy输出E(蓝门2,cost20) → ...
+**输入字段说明:**
+- waves: 出怪波次(时间/敌人/路线)
+- deployments: 每个干员的 name/location/direction/cost/skill/is_ground/defends_blue_door
+- expert_reference: 专家作业的操作序列(如果有)
 
 只输出 JSON: {"actions":[{"type":"SpeedUp"},{"type":"Deploy","name":"干员名","location":[x,y],"direction":"Right","costs":10}]}
 """
@@ -130,6 +125,7 @@ async def generate_job_pipeline(
     paths_desc: str = "",
     blue_doors: list[tuple[int, int]] = None,
     rag_context: str = "",
+    strategy_knowledge: str = "",
     api_key: str = "",
     base_url: str = "",
     model: str = "",
@@ -182,7 +178,8 @@ async def generate_job_pipeline(
         "map": map_info,
         "waves": wave_desc,
         "enemies": enemy_stats_desc,
-        "expert_reference": rag_context,  # RAG 检索的攻略+作业
+        "expert_reference": rag_context,
+        "strategy_knowledge": strategy_knowledge,
         "available_operators": ops_with_roles if ops_with_roles else ops_brief,
     }, ensure_ascii=False)
 
@@ -192,19 +189,29 @@ async def generate_job_pipeline(
     print("[Step1] 选中: %s" % ", ".join(selected_names))
 
     # ===== Step 2: 选位置 =====
-    # 只给选中干员的完整特性
-    selected_profiles = []
-    for line in (oper_profiles_full.split("\n") if oper_profiles_full else []):
-        for name in selected_names:
+    # 精简干员信息: 只保留角色/阻挡/费用/范围,去掉天赋/技能描述(减少噪音)
+    import re as _re2
+    position_profiles = []
+    for name in selected_names:
+        for line in (oper_profiles_full.split("\n") if oper_profiles_full else []):
             if line.startswith(name + " "):
-                selected_profiles.append(line)
+                m = _re2.search(r'\[(\w+)\].*?阻挡(\d+).*?费用(\d+).*?范围(.+?)(?:\s|天|$)', line)
+                if m:
+                    position_profiles.append({
+                        "name": name,
+                        "role": m.group(1),
+                        "block": int(m.group(2)),
+                        "cost": int(m.group(3)),
+                        "range": m.group(4).strip(),
+                    })
                 break
 
     step2_user = json.dumps({
         "stage": stage,
         "map": map_info,
         "enemy_paths": paths_desc,
-        "selected_operators": selected_profiles,
+        "operators": position_profiles,
+        "expert_positions": rag_context,  # 专家作业的位置作为参考
     }, ensure_ascii=False)
 
     print("[Step2] 选位置...")
@@ -225,6 +232,7 @@ async def generate_job_pipeline(
         "stage": stage,
         "enemies": enemy_stats_desc,
         "operators": skill_profiles,
+        "strategy_knowledge": strategy_knowledge,  # 统计规律:"圣聆初雪常用skill2"
     }, ensure_ascii=False)
 
     print("[Step3] 选技能...")
