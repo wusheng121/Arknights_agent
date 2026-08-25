@@ -2,13 +2,13 @@
   "stage_name": "act44side_07",
   "opers": [
     {
-      "name": "桃金娘",
-      "skill": 1,
+      "name": "伊内丝",
+      "skill": 2,
       "skill_usage": 1,
       "skill_times": 1
     },
     {
-      "name": "晓歌",
+      "name": "桃金娘",
       "skill": 1,
       "skill_usage": 1,
       "skill_times": 1
@@ -38,12 +38,6 @@
       "skill_times": 1
     },
     {
-      "name": "娜仁图亚",
-      "skill": 2,
-      "skill_usage": 1,
-      "skill_times": 1
-    },
-    {
       "name": "星熊",
       "skill": 3,
       "skill_usage": 1,
@@ -68,7 +62,13 @@
       "skill_times": 1
     },
     {
-      "name": "伊内丝",
+      "name": "黍",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "拉普兰德",
       "skill": 2,
       "skill_usage": 1,
       "skill_times": 1
@@ -87,9 +87,9 @@
       "name": "桃金娘",
       "location": [
         1,
-        5
+        2
       ],
-      "direction": "Right",
+      "direction": "Down",
       "costs": 10
     },
     {
@@ -101,16 +101,6 @@
       ],
       "direction": "Down",
       "costs": 11
-    },
-    {
-      "type": "Deploy",
-      "name": "晓歌",
-      "location": [
-        1,
-        2
-      ],
-      "direction": "Down",
-      "costs": 10
     },
     {
       "type": "Deploy",
@@ -126,6 +116,16 @@
       "type": "Deploy",
       "name": "塞雷娅",
       "location": [
+        1,
+        6
+      ],
+      "direction": "Right",
+      "costs": 22
+    },
+    {
+      "type": "Deploy",
+      "name": "黍",
+      "location": [
         8,
         3
       ],
@@ -134,13 +134,13 @@
     },
     {
       "type": "Deploy",
-      "name": "逻各斯",
+      "name": "夜莺",
       "location": [
         2,
-        4
+        5
       ],
-      "direction": "Down",
-      "costs": 21
+      "direction": "Right",
+      "costs": 18
     },
     {
       "type": "Retreat",
@@ -151,21 +151,6 @@
       "type": "Retreat",
       "name": "伊内丝",
       "costs": 30
-    },
-    {
-      "type": "Retreat",
-      "name": "晓歌",
-      "costs": 30
-    },
-    {
-      "type": "Deploy",
-      "name": "荒芜拉普兰德",
-      "location": [
-        6,
-        4
-      ],
-      "direction": "Left",
-      "costs": 22
     },
     {
       "type": "Deploy",
@@ -179,6 +164,26 @@
     },
     {
       "type": "Deploy",
+      "name": "逻各斯",
+      "location": [
+        2,
+        4
+      ],
+      "direction": "Down",
+      "costs": 21
+    },
+    {
+      "type": "Deploy",
+      "name": "荒芜拉普兰德",
+      "location": [
+        6,
+        4
+      ],
+      "direction": "Left",
+      "costs": 22
+    },
+    {
+      "type": "Deploy",
       "name": "澄闪",
       "location": [
         7,
@@ -189,19 +194,9 @@
     },
     {
       "type": "Deploy",
-      "name": "夜莺",
-      "location": [
-        6,
-        5
-      ],
-      "direction": "Left",
-      "costs": 18
-    },
-    {
-      "type": "Deploy",
       "name": "凯尔希·思衡托",
       "location": [
-        8,
+        6,
         5
       ],
       "direction": "Left",
@@ -209,13 +204,13 @@
     },
     {
       "type": "Deploy",
-      "name": "娜仁图亚",
+      "name": "拉普兰德",
       "location": [
-        2,
-        5
+        5,
+        3
       ],
-      "direction": "Right",
-      "costs": 16
+      "direction": "Down",
+      "costs": 19
     }
   ],
   "minimum_required": "v6.7.0"

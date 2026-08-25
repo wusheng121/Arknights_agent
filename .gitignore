@@ -35,6 +35,8 @@ copilot_formation.json
 
 # Game data (large, download separately)
 /data/
+# Expert jobs (crawled from prts.plus, see expert_crawler.py)
+/data/expert_jobs/
 # Job cache (regenerable)
 /job_cache/
 # Debug
