@@ -187,7 +187,116 @@ MAA 社区作业库可能比 wiki 文本质量更高（结构化、已验证）�
 
 ## 8. 待确认
 
-1. **prts.wiki 爬取范围**: 先聚焦前 N 个常用关卡 MVP?
-2. **MAA 作业 JSON 来源**: MAA 内置 74 份(SSS 为主),需要从社区爬取更多? 还是自己手写几份起步?
-3. **LLM 选择**: DeepSeek API 起手(已验证,便宜),后续可换?
-4. **向量库**: ChromaDB(本地,简单) vs FAISS(轻量) vs 云端?
+1. **prts.wiki 爬取范围**: 先聚焦前 N 个常用关卡 MVP? ✅ 已完成（255 关卡 1365 份作业）
+2. **MAA 作业 JSON 来源**: MAA 内置 74 份(SSS 为主),需要从社区爬取更多? ✅ 已从 prts.plus API 爬取
+3. **LLM 选择**: DeepSeek API 起手(已验证,便宜),后续可换? ✅ DeepSeek
+4. **向量库**: ChromaDB(本地,简单) vs FAISS(轻量) vs 云端? ✅ ChromaDB 已安装
+
+## 9. 实时控制方案（待实现）
+
+### 9.1 问题背景
+
+当前 MAA Copilot 模式是开环——执行专家作业的所有 actions（Deploy/Skill/Retreat），无法在 action 之间插入检测/调整。
+
+**具体问题**：弹药制技能（如予愿安洁莉娜 skill=3）的 `Skill kills:10` action 是"提前关闭技能"，但如果弹药在 kills=10 前已打完，MAA 仍会点击干员尝试关闭→只是选中干员→游戏变慢。
+
+### 9.2 方案：MAA Copilot + Python 并行监控
+
+**不移除 Skill action**，让 MAA Copilot 执行全部 actions（保证专家作业完整性）。Python 并行监控技能状态，记录分析（后续可实现主动干预）。
+
+```
+MAA Copilot 线程: 编队→开始战斗→Deploy→Skill→Retreat→SkillDaemon→完成
+     ↕ 并行
+Python 线程: get_image(MAA Minicap 5ms) → detect_skill_state(CV 50ms) → 记录/决策
+```
+
+### 9.3 技能状态检测（三种状态）
+
+已实现 `src/game/skill_detector.py`：
+
+| 状态 | 检测方式 | 含义 |
+|------|---------|------|
+| `not_ready` | 模板都不匹配 | 技能没好(SP 未充满) 或 技能已结束 |
+| `ready` | `BattleSkillReady.png` 匹配 | 技能好了但没开(SP 满,未激活) |
+| `active` | `BattleSkillStopOnClick-TopView.png` 匹配 | 技能开启中(正在释放) |
+
+### 9.4 决策逻辑（已实现）
+
+```python
+should_execute_skill_action(action_type, skill_state, is_ammo_skill):
+  # 弹药制技能 (Skill=关闭):
+  #   active → 执行关闭 ✅ (技能还在开,需要提前关)
+  #   not_ready → 跳过 ❌ (技能已结束,不需要关)
+  #   ready → 跳过 ❌ (技能没开,不需要关)
+  
+  # 普通技能 (Skill=激活):
+  #   ready → 执行激活 ✅ (技能好了,可以开)
+  #   active → 跳过 ❌ (已经在开了)
+  #   not_ready → 跳过 ❌ (没好,等等)
+```
+
+### 9.5 需要的 MAA Python API 绑定
+
+当前 `asst.py` 只绑定了 `get_image()`。需要增加绑定（无 C++ 改动）：
+
+| C API 函数 | Python 方法 | 用途 | 状态 |
+|------------|-----------|------|------|
+| `AsstAsyncClick(handle, x, y, block)` | `Asst.click(x, y)` | MAA Minitouch tap (<1ms) | 待绑定 |
+| `AsstGetImageBgr(handle, buff, size)` | `Asst.get_image_bgr()` | BGR 截图（OpenCV 格式） | 待绑定 |
+| `AsstAsyncScreencap(handle, block)` | `Asst.screencap()` | 异步触发截图 | 待绑定 |
+
+**注意**：MAA C API 没有导出 `AsstSwipe`。如需 Python 控制 swipe（部署干员），需要：
+- 路径 A：修改 MAA C++ 源码加 `AsstAsyncSwipe` → 重编译 MaaCore.dll
+- 路径 B：Python 移植 Minitouch 文本协议（socket 通信，独立于 MAA DLL）
+
+当前方案不涉及 swipe——Deploy 由 MAA Copilot 执行（可靠），Python 只做 tap（技能/撤退）和截图监控。
+
+### 9.6 实现步骤
+
+**Step 1**：绑定 MAA Python API（`asst.py` 加 3 个方法）
+- 无 C++ 改动，无重编译
+- 立即获得 MAA 级 tap + 截图能力
+
+**Step 2**：实时监控循环（Python 并行运行）
+```python
+# MAA Copilot 执行专家作业（包括 Skill action）
+await client.append("Copilot", {"filename": job_path, ...})
+await client.start()
+
+# Python 并行: 监控技能状态（记录分析,不干预）
+while client.running():
+    img = get_image_bgr()  # MAA Minicap 5ms
+    for oper in deployed_opers:
+        pos = tile_calc.get_tile_screen_pos(oper.row, oper.col)
+        state = detect_skill_state(img, pos)
+        log("  %s skill_state=%s" % (oper.name, state))
+    await asyncio.sleep(1)
+```
+
+**Step 3**（后续）：主动干预
+- 当检测到 Skill action 即将执行但技能状态显示不需要 → 用 `AsstStop()` 暂停 MAA
+- 用 `AsstAsyncClick()` 手动执行/跳过技能
+- 再用 `AsstStart()` 恢复 MAA 执行
+
+### 9.7 为什么不直接移除 Skill action
+
+用户明确指出：移除 Skill action 可能导致失败。专家作业作者设计的 Skill 时机是经过验证的，移除后：
+- 弹药制技能无法提前关闭 → 可能浪费弹药 → 后续波次无法应对
+- 普通技能无法在特定时机激活 → 战术节奏被打乱
+
+正确做法：**保留全部 actions，检测技能状态用于分析和未来的主动干预**。
+
+## 10. 数据源更新
+
+| 数据源 | 用途 | 位置 | 状态 |
+|--------|------|------|------|
+| MAA 安装 | 执行/感知/模板 | `C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\` | ✅ |
+| MAA 源码 | 参考/编译 | `C:\demo\MaaAssistantArknights-dev-v2\` | ✅ |
+| ArknightsGameData | 游戏数据 | `data/gamedata/` | ✅ |
+| prts.wiki | 补充数据 | `https://prts.wiki/api.php` | ✅ |
+| **prts.plus API** | **专家作业** | `https://prts.maa.plus/copilot/query` | ✅ |
+| **本地专家作业** | **RAG 检索** | `data/expert_jobs/` (255 关卡 1365 份) | ✅ |
+| MuMu 模拟器 | 游戏运行 | `127.0.0.1:16384` | ✅ |
+| DeepSeek API | LLM 大脑 | `.env` DEEPSEEK_API_KEY | ✅ |
+| 通义千问-VL | VLM 感知 | `.env` VLM_API_KEY | ✅ |
+| ChromaDB | 向量库 | 本地 | ✅ 已安装 |
