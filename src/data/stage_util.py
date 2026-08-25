@@ -108,6 +108,60 @@ def get_cache_path(cache_dir: str, stage_code: str, maa_path: str = "") -> str:
     return os.path.join(cache_dir, f"{sid}.json")
 
 
+def ensure_level_json_by_tile(maa_path: str, stage_id: str) -> str | None:
+    """用 tile JSON 的 levelId 下载 level JSON（获取敌人路径）。
+
+    tile JSON 有 levelId 字段（如 "obt/main/level_main_01-07"），
+    用它构造下载 URL 从 ArknightsGameData CDN 下载。
+    """
+    # 先找 tile JSON 获取 levelId
+    tile_dir = os.path.join(maa_path, "resource", "Arknights-Tile-Pos")
+    level_id = None
+    tile_file = None
+    if os.path.isdir(tile_dir):
+        for f in os.listdir(tile_dir):
+            if stage_id in f:
+                tile_path = os.path.join(tile_dir, f)
+                tile_file = tile_path
+                try:
+                    import json as _json
+                    with open(tile_path, encoding="utf-8") as fh:
+                        td = _json.load(fh)
+                    level_id = td.get("levelId", "")
+                except Exception:
+                    pass
+                break
+
+    if not level_id:
+        return None
+
+    # 构造本地路径和下载 URL
+    # level_id 格式: "obt/main/level_main_01-07" 或 "activities/act3d0/level_act3d0_f01"
+    local_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "data", "gamedata", "levels",
+        level_id.replace("/", os.sep) + ".json"
+    )
+
+    if os.path.exists(local_path):
+        return local_path
+
+    url = f"{_GAMEDATA_BASE}/levels/{level_id}.json"
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    for try_url in [url, url.replace("cdn.jsdelivr.net/gh", "raw.githubusercontent.com")]:
+        try:
+            req = urllib.request.Request(try_url, headers={"User-Agent": "ArknightsAgent/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return local_path
+        except Exception:
+            continue
+
+    return None
+
+
 def ensure_level_json(gamedata_path: str, stage_code: str, maa_path: str = "") -> str | None:
     """确保 level JSON 存在,不存在则自动下载。返回路径或 None。"""
     level_path = get_level_json_path(gamedata_path, stage_code, maa_path)
