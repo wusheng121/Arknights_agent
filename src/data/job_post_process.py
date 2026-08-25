@@ -23,10 +23,48 @@ ROLE_TO_DEPLOY = {
 }
 
 
-def post_process_job(job: dict, map_info: MapInfo, db: OperDatabase) -> dict:
+def post_process_job(job: dict, map_info: MapInfo, db: OperDatabase, has_expert: bool = False) -> dict:
     """后处理作业 JSON:修正方向 + 验证位置 + 类型匹配 + 去重。"""
     actions = job.get("actions", [])
     opers = job.get("opers", [])
+
+    # 0. 过滤不适合站场的干员类型 (仅无专家参考时)
+    if not has_expert:
+        from src.data.oper_profile import _load_char_table, _detect_combat_role
+        char_data = _load_char_table()
+        skill_data = None
+        try:
+            from src.data.oper_profile import _load_skill_table
+            skill_data = _load_skill_table()
+        except Exception:
+            pass
+        filtered_opers = []
+        for o in opers:
+            name = o.get("name", "")
+            if not name:
+                continue
+            prof = ""
+            sub = ""
+            char_entry = None
+            for k, v in char_data.items():
+                if v.get("name") == name:
+                    prof = v.get("profession", "")
+                    sub = v.get("subProfessionId", "")
+                    char_entry = v
+                    break
+            if prof and sub and char_entry:
+                trait = char_entry.get("trait", {})
+                trait_desc = ""
+                if isinstance(trait, dict):
+                    cands = trait.get("candidates", [])
+                    if cands:
+                        trait_desc = cands[-1].get("description", "")
+                role = _detect_combat_role(prof, sub, char_entry.get("skills", []), skill_data or {}, char_entry.get("tagList", []), trait_desc)
+                if role in ("utility", "burst_only"):
+                    continue
+            filtered_opers.append(o)
+        job["opers"] = filtered_opers
+        opers = filtered_opers
 
     # 1. 方向: 根据敌人路径自动计算每个位置朝向
     for action in actions:

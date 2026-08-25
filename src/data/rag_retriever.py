@@ -21,6 +21,7 @@ def retrieve_context(
     stage_id: str = "",
     maa_path: str = "",
     cache_dir: str = "",
+    expert_dir: str = "",
 ) -> str:
     """检索关卡攻略+作业,返回紧凑上下文文本。
 
@@ -29,6 +30,7 @@ def retrieve_context(
         stage_id: 关卡内部 ID (如 "main_01-07", "act44side_07")
         maa_path: MAA 安装路径
         cache_dir: 作业缓存目录
+        expert_dir: 专家作业目录
 
     Returns:
         "wiki攻略: ... | 专家作业: ..."
@@ -40,12 +42,12 @@ def retrieve_context(
     if wiki_guide:
         parts.append("wiki攻略: " + wiki_guide)
 
-    # 2. 专家作业 (按 stage_id 和 stage_code 都搜)
+    # 2. 专家作业 (优先本地专家作业，然后缓存，最后 API)
     expert_context = ""
     if stage_id:
-        expert_context = get_expert_jobs_context(stage_id, maa_path, cache_dir)
+        expert_context = get_expert_jobs_context(stage_id, maa_path, cache_dir, expert_dir)
     if not expert_context:
-        expert_context = get_expert_jobs_context(stage_code, maa_path, cache_dir)
+        expert_context = get_expert_jobs_context(stage_code, maa_path, cache_dir, expert_dir)
     if expert_context:
         parts.append(expert_context)
 

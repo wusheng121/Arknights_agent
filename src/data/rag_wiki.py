@@ -91,14 +91,19 @@ def parse_wikitext(wikitext: str) -> dict:
     if guide_match:
         result["guide_text"] = guide_match.group(1)[:500]
 
-    # 如果没有专门攻略模板,提取所有文本(去掉模板标记)
+    # 如果没有专门攻略模板,提取清理后的文本
     if not result["guide_text"]:
-        text = re.sub(r"\{\{[^}]+\}\}", "", wikitext)
-        text = re.sub(r"\[\[|\]\]", "", text)
-        text = re.sub(r"\{\||\|\}|\|-", "", text)
+        text = wikitext
+        # 清理 wikitext 标记
+        text = re.sub(r"\{\{[^}]*\}\}", " ", text)  # 模板
+        text = re.sub(r"\[\[(.+?)[\]\|].*?\]\]", r"\1", text)  # 链接
+        text = re.sub(r"\{\||\|\}|\|-|\|\+", " ", text)  # 表格
+        text = re.sub(r"==+([^=]+)==+", r"\n[\1]", text)  # 标题
+        text = re.sub(r"<[^>]+>", " ", text)  # HTML
+        text = re.sub(r"\n{3,}", "\n\n", text)
         text = text.strip()
         if text:
-            result["guide_text"] = text[:500]
+            result["guide_text"] = text[:800]
 
     return result
 

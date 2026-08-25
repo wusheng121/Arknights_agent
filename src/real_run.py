@@ -118,6 +118,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
         return
 
     # 检查作业缓存(有缓存直接用,跳过 LLM)
+    # 注意: --fresh 跳过缓存执行,但 RAG 仍可读取已缓存作业作为专家参考
     _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
     _cache_path = get_cache_path(_cache_dir, stage, MAA)
     if not fresh and os.path.exists(_cache_path):
@@ -203,7 +204,8 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     # RAG 检索: wiki 攻略 + 专家作业
     from src.data.rag_retriever import retrieve_context
     rag_context = retrieve_context(stage, stage_name_for_maa, MAA,
-                                   os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache")))
+                                   os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache")),
+                                   os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "expert_jobs")))
     if rag_context:
         log.info("RAG 检索结果:\n%s", rag_context[:300])
     else:
@@ -225,7 +227,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     job_data = doc.to_maa()
     try:
         if mi is not None:
-            job_data = post_process_job(job_data, mi, _db)
+            job_data = post_process_job(job_data, mi, _db, has_expert=bool(rag_context))
             with open(job_path, "w", encoding="utf-8") as f:
                 json.dump(job_data, f, ensure_ascii=False, indent=2)
             deploy_count = len([a for a in job_data.get("actions", []) if a.get("type") == "Deploy"])
@@ -313,7 +315,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     await asyncio.sleep(3)
     try:
         _stars = _detect_battle_result(ADB, ADDR, MAA)
-        if _stars > 0:
+        if _stars >= 3:
             log.info("=== 通关! Stars=%d ===", _stars)
             from src.data.stage_util import get_cache_path
             _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
