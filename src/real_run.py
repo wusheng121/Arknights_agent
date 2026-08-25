@@ -198,49 +198,120 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     oper_profiles = get_profiles_batch(top_names)
     log.info("干员特性: %d 个", len(oper_profiles.split("\n")))
 
-    log.info("DeepSeek 多步管道生成整关作业(model=%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
-    from src.brain.pipeline import generate_job_pipeline
-
     # RAG 检索: wiki 攻略 + 专家作业
     from src.data.rag_retriever import retrieve_context
+    from src.data.rag_jobs import search_expert_jobs_by_stage
+    expert_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "expert_jobs"))
     rag_context = retrieve_context(stage, stage_name_for_maa, MAA,
                                    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache")),
-                                   os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "expert_jobs")))
+                                   expert_dir)
     if rag_context:
         log.info("RAG 检索结果:\n%s", rag_context[:300])
     else:
         log.info("RAG: 无检索结果(新关卡,走通用推理)")
 
-    doc = await generate_job_pipeline(
-        operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
-        mi.blue_doors if mi else None,
-        rag_context=rag_context,
-    )
-    log.info("作业: stage=%s opers=%d actions=%d", doc.stage_name, len(doc.opers), len(doc.actions))
-    job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
-    with open(job_path, "w", encoding="utf-8") as f:
-        json.dump(doc.to_maa(), f, ensure_ascii=False, indent=2)
-    log.info("作业写入 %s", job_path)
+    # 检查专家作业: 按练度筛选 + 选动作最少的
+    user_oper_map = {o.get("name", ""): o for o in operators}
+    expert_jobs = search_expert_jobs_by_stage(stage_name_for_maa, expert_dir)
+    valid_experts = []  # 满足练度要求的作业
+    for ej in expert_jobs:
+        ej_names = set(o.get("name", "") for o in ej.opers)
+        if not ej_names:
+            continue
+        # 检查干员匹配 + 练度
+        all_ok = True
+        missing = []
+        for eo in ej.opers:
+            name = eo.get("name", "")
+            user_op = user_oper_map.get(name)
+            if not user_op:
+                missing.append(name)
+                all_ok = False
+                break
+            # 检查 requirements (从专家作业原始文件读)
+            # ej.file_path 指向原始 JSON
+            req = eo.get("requirements", {})
+            if req:
+                user_elite = user_op.get("elite", 0) or 0
+                user_level = user_op.get("level", 0) or 0
+                req_elite = req.get("elite", 0)
+                req_level = req.get("level", 0)
+                if user_elite < req_elite or user_level < req_level:
+                    all_ok = False
+                    log.info("  %s: %s 练度不足 (elite %d<%d / level %d<%d)" % (
+                        os.path.basename(ej.file_path), name,
+                        user_elite, req_elite, user_level, req_level))
+                    break
+        if all_ok and not missing:
+            valid_experts.append(ej)
+            log.info("  %s: 匹配 OK (opers=%s actions=%d)" % (
+                os.path.basename(ej.file_path), list(ej_names), len(ej.actions)))
 
-    # 后处理:修正方向 + 验证位置 + 类型匹配 + 去重 + 撤先锋 + 蓝门覆盖
-    from src.data.job_post_process import post_process_job
-    job_data = doc.to_maa()
-    try:
-        if mi is not None:
-            job_data = post_process_job(job_data, mi, _db, has_expert=bool(rag_context))
-            with open(job_path, "w", encoding="utf-8") as f:
-                json.dump(job_data, f, ensure_ascii=False, indent=2)
-            deploy_count = len([a for a in job_data.get("actions", []) if a.get("type") == "Deploy"])
-            retreat_count = len([a for a in job_data.get("actions", []) if a.get("type") == "Retreat"])
-            log.info("后处理完成: actions=%d deploys=%d retreats=%d", len(job_data.get("actions", [])), deploy_count, retreat_count)
-        else:
-            log.warning("无地图信息,跳过后处理")
-            with open(job_path, "w", encoding="utf-8") as f:
-                json.dump(job_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.error("后处理失败: %s", e)
+    # 从满足练度的作业中选动作最少的
+    best_expert = None
+    if valid_experts:
+        valid_experts.sort(key=lambda j: len(j.actions))
+        best_expert = valid_experts[0]
+        best_match = 1.0
+        log.info("=== 使用专家作业(练度满足,动作最少): %s ===" % best_expert.file_path)
+    elif expert_jobs:
+        # 有专家作业但不满足练度 → 用 LLM 适配
+        best_match = 0.5
+        best_expert = None
+        log.info("专家作业存在但练度不满足,走 LLM 适配")
+    else:
+        best_match = 0
+        best_expert = None
+    if best_expert and best_match >= 1.0:
+        # 有满足练度的专家作业 → 直接使用,跳过 LLM 和后处理
+        log.info("=== 使用专家作业(练度满足): %s ===" % best_expert.file_path)
+        with open(best_expert.file_path, encoding="utf-8") as f:
+            expert_json = json.load(f)
+        job_data = expert_json
+        job_data["stage_name"] = stage_name_for_maa
+        # 保留 requirements (MAA 会检查,但我们已经预检过了)
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
+        log.info("专家作业直接使用: opers=%d actions=%d (跳过后处理)" % (
+            len(job_data.get("opers", [])), len(job_data.get("actions", []))))
+    elif best_expert and best_match > 0:
+        # 部分匹配 → 告诉 LLM 哪些干员需要替代
+        log.info("专家作业匹配度 %.0f%%,需要 LLM 适配替代干员" % (best_match * 100))
+        doc = await generate_job_pipeline(
+            operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
+            mi.blue_doors if mi else None,
+            rag_context=rag_context,
+        )
+        job_data = doc.to_maa()
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+        with open(job_path, "w", encoding="utf-8") as f:
+            json.dump(job_data, f, ensure_ascii=False, indent=2)
+        log.info("LLM 适配生成: opers=%d actions=%d (跳过后处理)" % (len(doc.opers), len(doc.actions)))
+    else:
+        # 无专家作业 → 走完整管道 + 后处理
+        log.info("无匹配专家作业,走 LLM 管道 + 后处理")
+        from src.brain.pipeline import generate_job_pipeline
+        doc = await generate_job_pipeline(
+            operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
+            mi.blue_doors if mi else None,
+            rag_context=rag_context,
+        )
+        job_data = doc.to_maa()
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+        with open(job_path, "w", encoding="utf-8") as f:
+            json.dump(job_data, f, ensure_ascii=False, indent=2)
+
+        # 后处理(仅无专家作业时)
+        from src.data.job_post_process import post_process_job
+        try:
+            if mi is not None:
+                job_data = post_process_job(job_data, mi, _db, has_expert=False)
+                with open(job_path, "w", encoding="utf-8") as f:
+                    json.dump(job_data, f, ensure_ascii=False, indent=2)
+                log.info("后处理完成: actions=%d" % len(job_data.get("actions", [])))
+        except Exception as e:
+            log.error("后处理失败: %s", e)
 
     # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA)
     await _run_maa_copilot(job_path, job_data, stage)
@@ -273,21 +344,20 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
     await client.start()
 
-    # 异步监控: 如果 30 秒没进战斗, ADB tap 开始作战(只 tap 一次)
+    # 异步监控: 18 秒后 ADB tap 开始作战(足够编队完成)
     _adb_tapped = False
     import time as _time
     _start_time = _time.time()
 
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         if not client.running():
             break
-        # 战斗已开始(MAA在执行actions)就不需要 ADB tap
         if _battle_started:
             continue
-        # 30 秒未进战斗, ADB tap 开始作战(只一次,不管成功与否)
-        if not _adb_tapped and _time.time() - _start_time > 30:
-            log.info("30 秒未进战斗, ADB tap 开始作战...")
+        # 18 秒后 ADB tap (编队通常 10-15 秒完成)
+        if not _adb_tapped and _time.time() - _start_time > 18:
+            log.info("编队后 10 秒未进战斗, ADB tap 开始作战...")
             _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
             if _t is not None:
                 _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
