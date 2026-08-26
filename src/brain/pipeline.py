@@ -15,18 +15,18 @@ from typing import Any
 from src.game.copilot_schema import Action, CopilotDoc, OperSpec
 
 
-PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图、波次、敌人、专家参考、策略知识和可用干员,选编队。
+PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图、波次、敌人、专家参考、策略知识、因果原则和可用干员,选编队。
 
-**学习而非照抄:**
-- 如果有 expert_reference: 理解专家选这些干员的原因(角色搭配/费用节奏/应对敌人),适配用户可用干员
-- 如果有 strategy_knowledge: 参考统计规律(哪些干员最常用、团队人数分布)
-- 如果两者都没有: 根据敌人属性和地图信息自行推理
-- 专家用低星干员通关,用户有高星干员 → 可以选更好的,但要理解专家为什么选那些干员(费用低/角色互补)
+**三层信息(按优先级):**
+1. principles: 因果原则(从1365份专家作业蒸馏的规律,带condition和reason)→用原则推理
+2. expert_reference: 专家作业参考 → 理解专家为什么选这些干员,适配用户可用干员
+3. strategy_knowledge: 统计规律 → 频率参考
 
 **输入字段说明:**
 - map: 地图信息(红蓝门/可部署格子/敌人方向/战术建议)
 - waves: 出怪波次(时间/敌人/路线)
 - enemies: 敌人属性(HP/ATK/DEF/RES)
+- principles: 因果原则(pattern/condition/reason)
 - expert_reference: 专家作业参考(干员选择/位置/技能/操作序列)
 - strategy_knowledge: 1365份作业的统计规律
 - available_operators: 用户可用干员(角色/阻挡/费用/范围/天赋/技能)
@@ -126,6 +126,7 @@ async def generate_job_pipeline(
     blue_doors: list[tuple[int, int]] = None,
     rag_context: str = "",
     strategy_knowledge: str = "",
+    principles: str = "",
     api_key: str = "",
     base_url: str = "",
     model: str = "",
@@ -180,6 +181,7 @@ async def generate_job_pipeline(
         "enemies": enemy_stats_desc,
         "expert_reference": rag_context,
         "strategy_knowledge": strategy_knowledge,
+        "principles": principles,
         "available_operators": ops_with_roles if ops_with_roles else ops_brief,
     }, ensure_ascii=False)
 
@@ -211,7 +213,8 @@ async def generate_job_pipeline(
         "map": map_info,
         "enemy_paths": paths_desc,
         "operators": position_profiles,
-        "expert_positions": rag_context,  # 专家作业的位置作为参考
+        "expert_positions": rag_context,
+        "principles": principles,
     }, ensure_ascii=False)
 
     print("[Step2] 选位置...")
@@ -232,7 +235,8 @@ async def generate_job_pipeline(
         "stage": stage,
         "enemies": enemy_stats_desc,
         "operators": skill_profiles,
-        "strategy_knowledge": strategy_knowledge,  # 统计规律:"圣聆初雪常用skill2"
+        "strategy_knowledge": strategy_knowledge,
+        "principles": principles,
     }, ensure_ascii=False)
 
     print("[Step3] 选技能...")
@@ -281,6 +285,8 @@ async def generate_job_pipeline(
         "stage": stage,
         "waves": wave_desc,
         "deployments": deploy_list,
+        "expert_reference": rag_context,
+        "principles": principles,
     }, ensure_ascii=False)
 
     print("[Step4] 定部署顺序...")

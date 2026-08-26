@@ -62,49 +62,15 @@ class MapInfo:
         return "\n".join(lines)
 
     def to_tactical_description(self) -> str:
-        """生成战术建议(红蓝门位置 → 阻挡位/输出位建议)。"""
+        """Only raw facts: door positions. No tactical suggestions."""
         lines = []
         if self.blue_doors:
-            bx = self.blue_doors[0][0]
-            lines.append(f"蓝门在 col {bx},敌人到达蓝门算失败。")
+            lines.append(f"blue_doors: {self.blue_doors}")
         if self.red_doors:
-            door_cols = [d[0] for d in self.red_doors]
-            max_door_col = max(door_cols)
-            lines.append(f"红门(敌人来路)在 col {max_door_col},有 {len(self.red_doors)} 个入口。")
-            for door in self.red_doors:
-                lines.append(f"  红门({door[0]},{door[1]}) → 敌人从此进入向{self.enemy_direction}")
-        # 阻挡位: 蓝门附近 3 格内
-        if self.blue_doors and self.melee_tiles:
-            bx = self.blue_doors[0][0]
-            if self.enemy_direction == "从右向左":
-                # 蓝门在左,阻挡位在蓝门右侧 col bx ~ bx+3
-                block_tiles = [(c, r) for c, r in self.melee_tiles if bx <= c <= bx + 3]
-            else:
-                # 蓝门在右,阻挡位在蓝门左侧 col bx-3 ~ bx
-                block_tiles = [(c, r) for c, r in self.melee_tiles if bx - 3 <= c <= bx]
-            if block_tiles:
-                lines.append(f"阻挡位(蓝门附近): {block_tiles[:8]}")
-        # 输出位: 高台
-        if self.ranged_tiles:
-            lines.append(f"高台输出位: {self.ranged_tiles[:8]}")
-        # 朝向 (面向敌人来的方向)
-        d = self.enemy_direction
-        if d == "从右向左":
-            lines.append("干员朝向: Right(敌人从右侧来)")
-        elif d == "从左向右":
-            lines.append("干员朝向: Left(敌人从左侧来)")
-        elif d == "从上向下":
-            lines.append("干员朝向: Up(敌人从上方来)")
-        elif d == "从下向上":
-            lines.append("干员朝向: Down(敌人从下方来)")
-        else:
-            lines.append("干员朝向: 根据位置自行判断(敌人多方向来)")
-        # 蓝门防守要求
+            lines.append(f"red_doors: {self.red_doors}")
         if len(self.blue_doors) > 1:
-            lines.append(f"注意: 有 {len(self.blue_doors)} 个蓝门,每个蓝门附近都需要放阻挡位!")
-        return "\n".join(lines)
-
-
+            lines.append(f"multiple_blue_doors: {len(self.blue_doors)}")
+        return chr(10).join(lines) if lines else ""
 def parse_tile_json(path: str) -> MapInfo:
     """解析 MAA tile JSON → MapInfo。"""
     with open(path, encoding="utf-8") as f:

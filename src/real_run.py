@@ -198,13 +198,28 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
     oper_profiles = get_profiles_batch(top_names)
     log.info("干员特性: %d 个", len(oper_profiles.split("\n")))
 
-    # 加载策略知识库
+    # 加载策略知识库 + 因果原则
     strategy_knowledge = ""
     pattern_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "patterns", "strategy_knowledge.txt"))
     if os.path.exists(pattern_path):
         with open(pattern_path, encoding="utf-8") as f:
             strategy_knowledge = f.read()
         log.info("策略知识库: %d chars", len(strategy_knowledge))
+    principles = ""
+    principles_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "patterns", "principles.json"))
+    if os.path.exists(principles_path):
+        with open(principles_path, encoding="utf-8") as f:
+            principles_data = json.load(f)
+        # 转为紧凑文本
+        lines = []
+        for p in principles_data.get("principles", []):
+            lines.append("[%s] %s (confidence:%s)" % (p.get("id",""), p.get("pattern",""), p.get("confidence","?")))
+            if p.get("condition"):
+                lines.append("  condition: %s" % p["condition"])
+            if p.get("reason"):
+                lines.append("  reason: %s" % p["reason"])
+        principles = "\n".join(lines)
+        log.info("因果原则: %d 条, %d chars", len(principles_data.get("principles", [])), len(principles))
 
     # RAG 检索: wiki 攻略 + 专家作业
     from src.data.rag_retriever import retrieve_context
@@ -292,6 +307,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             mi.blue_doors if mi else None,
             rag_context=rag_context,
             strategy_knowledge=strategy_knowledge,
+            principles=principles,
         )
         job_data = doc.to_maa()
         job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
@@ -307,6 +323,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             mi.blue_doors if mi else None,
             rag_context=rag_context,
             strategy_knowledge=strategy_knowledge,
+            principles=principles,
         )
         job_data = doc.to_maa()
         job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
