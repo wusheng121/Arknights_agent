@@ -1,0 +1,127 @@
+{
+  "stage_name": "act44side_07",
+  "opers": [
+    {
+      "name": "伊内丝",
+      "skill": 2,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "维什戴尔",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "逻各斯",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "塞雷娅",
+      "skill": 1,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "夜莺",
+      "skill": 3,
+      "skill_usage": 1,
+      "skill_times": 1
+    },
+    {
+      "name": "桃金娘",
+      "skill": 1,
+      "skill_usage": 1,
+      "skill_times": 1
+    }
+  ],
+  "groups": [],
+  "actions": [
+    {
+      "type": "SpeedUp",
+      "location": [],
+      "direction": "Right"
+    },
+    {
+      "type": "Deploy",
+      "name": "桃金娘",
+      "location": [
+        1,
+        2
+      ],
+      "direction": "Down",
+      "costs": 10
+    },
+    {
+      "type": "Deploy",
+      "name": "伊内丝",
+      "location": [
+        2,
+        4
+      ],
+      "direction": "Down",
+      "costs": 11
+    },
+    {
+      "type": "Deploy",
+      "name": "维什戴尔",
+      "location": [
+        8,
+        1
+      ],
+      "direction": "Left",
+      "costs": 25
+    },
+    {
+      "type": "Deploy",
+      "name": "逻各斯",
+      "location": [
+        6,
+        4
+      ],
+      "direction": "Left",
+      "costs": 21
+    },
+    {
+      "type": "Deploy",
+      "name": "塞雷娅",
+      "location": [
+        5,
+        4
+      ],
+      "direction": "Left",
+      "costs": 22
+    },
+    {
+      "type": "Deploy",
+      "name": "夜莺",
+      "location": [
+        2,
+        5
+      ],
+      "direction": "Right",
+      "costs": 18
+    },
+    {
+      "type": "Skill",
+      "name": "维什戴尔",
+      "location": [],
+      "direction": "Right"
+    },
+    {
+      "type": "Skill",
+      "name": "逻各斯",
+      "location": [],
+      "direction": "Right"
+    },
+    {
+      "type": "SkillDaemon",
+      "location": [],
+      "direction": "Right"
+    }
+  ],
+  "minimum_required": "v6.7.0"
+}
