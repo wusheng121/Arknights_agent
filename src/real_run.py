@@ -315,8 +315,8 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
         log.info("LLM 适配生成: opers=%d actions=%d (跳过后处理)" % (len(doc.opers), len(doc.actions)))
     else:
-        # 无专家作业 → 走完整管道 + 后处理
-        log.info("无匹配专家作业,走 LLM 管道 + 后处理")
+        # 无专家作业 → 走完整管道 + 后处理 + sim 验证
+        log.info("无匹配专家作业,走 LLM 管道 + 后处理 + sim 验证")
         from src.brain.pipeline import generate_job_pipeline
         doc = await generate_job_pipeline(
             operators, stage_name_for_maa, map_info, wave_desc, enemy_stats_desc, oper_profiles, paths_desc,
@@ -340,6 +340,22 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
                 log.info("后处理完成: actions=%d" % len(job_data.get("actions", [])))
         except Exception as e:
             log.error("后处理失败: %s", e)
+
+        # sim 验证 + LLM 修正
+        try:
+            from src.sim.validate import validate_and_fix
+            from openai import AsyncOpenAI
+            sim_client = AsyncOpenAI(
+                api_key=os.getenv("DEEPSEEK_API_KEY"),
+                base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            )
+            sim_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+            job_data = await validate_and_fix(job_data, stage_name_for_maa, sim_client, sim_model, max_fixes=2)
+            # 写回修正后的作业
+            with open(job_path, "w", encoding="utf-8") as f:
+                json.dump(job_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.warning("sim 验证跳过: %s", e)
 
     # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA)
     await _run_maa_copilot(job_path, job_data, stage)
