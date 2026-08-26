@@ -428,7 +428,7 @@ class GameState:
         self.events.append(SimEvent(tick=self.tick, event=event, details=kwargs))
 
     def get_snapshot(self) -> dict:
-        """结构化快照 for LLM。"""
+        """结构化快照 for LLM."""
         return {
             "tick": round(self.tick, 1),
             "dp": self.dp,
@@ -495,7 +495,7 @@ class GameState:
         return min(abs(int(enemy.col) - bd[0]) + abs(int(enemy.row) - bd[1]) for bd in self.blue_doors)
 
 
-def run_job(stage_id: str, job: dict, max_ticks: int = 10000) -> dict:
+def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
     """运行一份作业,返回结果。"""
     stage_data = load_stage(stage_id)
     state = GameState(stage_data)
@@ -553,6 +553,12 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 10000) -> dict:
 
         if state.game_over:
             break
+
+    # Timeout
+    if not state.game_over:
+        state.game_over = True
+        state.won = False
+        state._log("game_over", result="lose", reason="timeout")
 
     return {
         "result": "win" if state.won else "lose",
