@@ -221,6 +221,13 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
         principles = "\n".join(lines)
         log.info("因果原则: %d 条, %d chars", len(principles_data.get("principles", [])), len(principles))
 
+    # 加载自反思记忆
+    from src.sim.memory import MemoryStore
+    memory_store = MemoryStore()
+    memory_text = memory_store.get_lessons_for_prompt(stage_name_for_maa)
+    if memory_text:
+        log.info("自反思记忆:\n%s", memory_text[:300])
+
     # RAG 检索: wiki 攻略 + 专家作业
     from src.data.rag_retriever import retrieve_context
     from src.data.rag_jobs import search_expert_jobs_by_stage
@@ -341,9 +348,11 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
         except Exception as e:
             log.error("后处理失败: %s", e)
 
-        # sim 验证 + LLM 修正
+        # sim 验证 + LLM 修正 + 记忆记录
         try:
             from src.sim.validate import validate_and_fix
+            from src.sim.memory import MemoryStore, classify_failure
+            from src.sim.game_state import run_job as sim_run_job
             from openai import AsyncOpenAI
             sim_client = AsyncOpenAI(
                 api_key=os.getenv("DEEPSEEK_API_KEY"),
@@ -354,6 +363,11 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             # 写回修正后的作业
             with open(job_path, "w", encoding="utf-8") as f:
                 json.dump(job_data, f, ensure_ascii=False, indent=2)
+            # 记录 sim 结果到记忆
+            sim_result = sim_run_job(stage_name_for_maa, job_data)
+            entry = classify_failure(sim_result, job_data)
+            MemoryStore().record(entry)
+            log.info("sim 记忆: %s %s (%s)", entry.outcome, entry.failure_mode, entry.lesson[:40])
         except Exception as e:
             log.warning("sim 验证跳过: %s", e)
 
