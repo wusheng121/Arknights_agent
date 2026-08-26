@@ -92,6 +92,34 @@ def _clean_text(text: str) -> str:
     return text
 
 
+def _get_attr_val(val) -> float:
+    """从 character_table 的属性值中提取数值。"""
+    if isinstance(val, dict):
+        return val.get("m_value", 0) or 0
+    return val or 0
+
+
+def _get_range_tiles(operator_name: str) -> list:
+    """从 MAA battle_data 获取攻击范围的 tile 坐标。"""
+    try:
+        import json as _json
+        maa_path = r"C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\resource\battle_data.json"
+        with open(maa_path, encoding="utf-8") as f:
+            bd = _json.load(f)
+        chars = bd.get("chars", {})
+        ranges = bd.get("ranges", {})
+        for k, v in chars.items():
+            if v.get("name") == operator_name:
+                rids = v.get("rangeId", [])
+                if rids:
+                    rid = rids[-1]  # 精二范围
+                    return ranges.get(rid, [])
+                break
+    except Exception:
+        pass
+    return []
+
+
 def _get_range_desc(operator_name: str) -> str:
     """从 MAA battle_data.json 获取攻击范围描述。"""
     try:
@@ -220,9 +248,11 @@ def get_operator_profile(name: str, char_path: str = "", skill_path: str = "") -
             trait_desc_text = _clean_text(candidates[-1].get("description", ""))
     combat_role = _detect_combat_role(prof, sub, char.get("skills", []), skill_data, tags, trait_desc_text)
 
-    # 获取阻挡数和部署费用(从 phases 精二数据)
+    # 获取阻挡数/部署费用/HP/ATK/DEF/RES/攻击间隔 (从 phases 精二数据)
     block = 0
     deploy_cost = 0
+    hp = atk = defense = res = 0
+    attack_time = 0.0
     phases = char.get("phases", [])
     if len(phases) >= 3:
         attrs = phases[2].get("attributesKeyFrames", [])
@@ -230,14 +260,32 @@ def get_operator_profile(name: str, char_path: str = "", skill_path: str = "") -
             data = attrs[-1].get("data", {})
             block = data.get("blockCnt", 0) or 0
             deploy_cost = data.get("cost", 0) or 0
+            hp = _get_attr_val(data.get("maxHp"))
+            atk = _get_attr_val(data.get("atk"))
+            defense = _get_attr_val(data.get("def"))
+            res = _get_attr_val(data.get("magicResistance"))
+            attack_time = _get_attr_val(data.get("baseAttackTime"))
     elif phases:
         attrs = phases[0].get("attributesKeyFrames", [])
         if attrs:
             data = attrs[-1].get("data", {})
             block = data.get("blockCnt", 0) or 0
             deploy_cost = data.get("cost", 0) or 0
+            hp = _get_attr_val(data.get("maxHp"))
+            atk = _get_attr_val(data.get("atk"))
+            defense = _get_attr_val(data.get("def"))
+            res = _get_attr_val(data.get("magicResistance"))
+            attack_time = _get_attr_val(data.get("baseAttackTime"))
 
-    parts = [name + " [" + combat_role + "] " + prof + "/" + sub_cn + " 阻挡" + str(block) + " 费用" + str(deploy_cost) + " 范围" + _get_range_desc(name)]
+    # 获取攻击范围 tile 坐标 (从 MAA battle_data)
+    range_tiles = _get_range_tiles(name)
+
+    parts = [name + " [" + combat_role + "] " + prof + "/" + sub_cn +
+             " HP" + str(hp) + " ATK" + str(atk) + " DEF" + str(defense) + " RES" + str(int(res)) +
+             " 阻挡" + str(block) + " 费用" + str(deploy_cost) +
+             " 攻击间隔" + str(attack_time) + "s" +
+             " 范围" + _get_range_desc(name) +
+             " 范围坐标" + str(range_tiles[:12])]
 
     # 特性 (trait)
     trait = char.get("trait", {})
@@ -264,7 +312,7 @@ def get_operator_profile(name: str, char_path: str = "", skill_path: str = "") -
     if tags:
         parts.append("标签:" + "/".join(tags))
 
-    # 技能
+    # 技能 (含精确 SP 数据)
     for i, s_ref in enumerate(char.get("skills", [])):
         skill_id = s_ref.get("skillId", "")
         if not skill_id or skill_id not in skill_data:
@@ -273,19 +321,31 @@ def get_operator_profile(name: str, char_path: str = "", skill_path: str = "") -
         levels = s_data.get("levels", [])
         if not levels:
             continue
-        lv = levels[0]
+        lv = levels[-1] if len(levels) >= 7 else levels[0]  # 优先用满级数据
         sname = lv.get("name", "")
         sdesc = _clean_text(lv.get("description", ""))
         sp = lv.get("spData", {})
         sp_cost = sp.get("spCost", 0) or 0
+        sp_init = sp.get("initSp", 0) or 0
+        sp_type = sp.get("spType", "")
         dur = lv.get("duration", 0) or 0
+        
+        # SP 类型翻译
+        sp_type_cn = {"INCREASE_WITH_TIME": "每秒+1", "INCREASE_WHEN_ATTACK": "攻击时+1"}.get(sp_type, sp_type)
+        
+        # 持续时间翻译
+        if dur == -1 or dur == -1.0:
+            dur_str = "无限(弹药制/可手动关闭)"
+        elif dur > 0:
+            dur_str = str(int(dur)) + "s"
+        else:
+            dur_str = "瞬时"
+        
         skill_str = "技能" + str(i + 1) + ":" + sname
         if sdesc:
-            skill_str += " " + sdesc[:50]
-        if sp_cost:
-            skill_str += " CD" + str(sp_cost) + "s"
-        if dur:
-            skill_str += " 持续" + str(int(dur)) + "s"
+            skill_str += " " + sdesc[:40]
+        skill_str += " SPneed=" + str(sp_cost) + " init=" + str(sp_init) + " " + str(sp_type_cn)
+        skill_str += " 持续" + str(dur_str)
         parts.append(skill_str)
 
     return " ".join(parts)
