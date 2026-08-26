@@ -144,10 +144,10 @@ class GameState:
             self._log("deploy_failed", oper=name, reason="ranged_on_ground_tile", pos=pos)
             return False
 
-        # Find skill
+        # Find skill (skill_index=0 means use skill 1)
         skill = None
         for s in op_data.skills:
-            if s.skill_index == skill_index:
+            if s.skill_index == skill_index or (skill_index == 0 and s.skill_index == 1):
                 skill = s
                 break
         if not skill and op_data.skills:
@@ -388,26 +388,62 @@ class GameState:
 
     def _operator_attack(self, op: SimOperator):
         """干员攻击范围内的敌人(或治疗友方)。"""
+        # Calculate effective stats with skill effects
+        atk = op.atk
+        attack_time = op.attack_time
+        max_targets = 1
+
+        if op.skill_active and op.skill and op.skill.blackboard:
+            bb = op.skill.blackboard
+            # ATK bonus (e.g. {"atk": 1.8} means ATK * (1 + 1.8) = 2.8x)
+            if "atk" in bb:
+                atk = int(op.atk * (1 + bb["atk"]))
+            # Attack speed change
+            if "base_attack_time" in bb:
+                attack_time = max(0.1, op.attack_time + bb["base_attack_time"])
+            # Multi-target
+            if "attack@max_target" in bb:
+                max_targets = int(bb["attack@max_target"])
+            if "max_target" in bb:
+                max_targets = int(bb["max_target"])
+
+        op.attack_cooldown = attack_time
+
         if op.is_medic:
             # Heal lowest HP ally in range
             allies = self._allies_in_range(op)
             if allies:
                 target = min(allies, key=lambda a: a.hp / a.max_hp)
-                heal = int(op.atk * 1.0)  # simplified
+                heal_scale = 1.0
+                if op.skill_active and op.skill and op.skill.blackboard:
+                    bb = op.skill.blackboard
+                    if "atk" in bb:
+                        heal_scale = 1 + bb["atk"]
+                    if "heal_scale" in bb:
+                        heal_scale = bb["heal_scale"]
+                    if "attack@heal_scale" in bb:
+                        heal_scale = bb["attack@heal_scale"]
+                heal = int(atk * heal_scale)
                 target.hp = min(target.hp + heal, target.max_hp)
         else:
             # Attack enemies in range
             targets = [e for e in self.enemies if e.alive and (int(e.col), int(e.row)) in op.range_tiles]
             if targets:
-                target = targets[0]  # attack first target
-                damage = max(op.atk - target.defense, 1)
-                target.hp -= damage
-                if target.hp <= 0:
-                    target.alive = False
-                    self._log("enemy_killed", enemy=target.name, by=op.name)
-                # SP regen on attack
-                if op.skill and op.skill.sp_type == "INCREASE_WHEN_ATTACK" and not op.skill_active:
-                    op.sp = min(op.sp + 1, op.skill.sp_cost)
+                # Attack up to max_targets
+                for target in targets[:max_targets]:
+                    # Damage: physical (atk - def) or depends on profession
+                    if op.profession in ("CASTER",):
+                        # Caster: magic damage (atk - res, but res is percentage)
+                        damage = max(int(atk * (1 - target.res / 100)), 1)
+                    else:
+                        damage = max(atk - target.defense, 1)
+                    target.hp -= damage
+                    if target.hp <= 0:
+                        target.alive = False
+                        self._log("enemy_killed", enemy=target.name, by=op.name)
+                    # SP regen on attack
+                    if op.skill and op.skill.sp_type == "INCREASE_WHEN_ATTACK" and not op.skill_active:
+                        op.sp = min(op.sp + 1, op.skill.sp_cost)
 
     def _allies_in_range(self, op: SimOperator) -> list[SimOperator]:
         """找范围内的友方干员(非自己)。"""
@@ -518,7 +554,16 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
                 name = action.get("name", "")
                 loc = action.get("location", [0, 0])
                 direction = action.get("direction", "Right")
+                # Use action costs if available, otherwise use operator's actual cost
                 costs = action.get("costs", 0)
+                if not costs:
+                    # Look up operator cost
+                    try:
+                        from src.sim.data_loader import load_operator
+                        op_data = load_operator(name)
+                        costs = op_data.cost
+                    except Exception:
+                        costs = 0
                 if costs and state.dp < costs:
                     break  # wait for DP
                 skill_idx = 1
@@ -526,6 +571,15 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
                     if o.get("name") == name:
                         skill_idx = o.get("skill", 1)
                         break
+                post_delay = action.get('post_delay', 0)
+                if post_delay:
+                    post_delay_s = post_delay / 1000.0
+                    # Step forward for post_delay
+                    steps = int(post_delay_s / tick_interval)
+                    for _ in range(steps):
+                        state.step(tick_interval)
+                        if state.game_over:
+                            break
                 if state.deploy(name, int(loc[0]), int(loc[1]), direction, skill_idx):
                     action_index += 1
                 else:

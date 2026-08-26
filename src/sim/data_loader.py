@@ -62,6 +62,7 @@ class SkillData:
     sp_type: str  # INCREASE_WITH_TIME / INCREASE_WHEN_ATTACK
     duration: float  # seconds, -1 = infinite (ammo)
     description: str
+    blackboard: dict = None  # key→value (e.g. {"atk": 1.8, "base_attack_time": 2.9})
 
 
 @dataclass
@@ -136,7 +137,7 @@ def load_stage(stage_id: str) -> dict:
         waypoints = []
         if sp.get("col") is not None:
             waypoints.append((int(sp["col"]), int(sp["row"])))
-        for cp in r.get("checkpoints", []):
+        for cp in (r.get("checkpoints") or []):
             if cp.get("type") == "MOVE":
                 pos = cp.get("position", {})
                 if pos.get("col") is not None:
@@ -284,6 +285,18 @@ def load_operator(name: str) -> OperatorData:
         lv = levels[-1] if len(levels) >= 7 else levels[0]
         sp = lv.get("spData", {})
         dur = lv.get("duration", 0) or 0
+        # Parse blackboard (skill effect values)
+        bb_raw = lv.get("blackboard", [])
+        bb = {}
+        if isinstance(bb_raw, list):
+            for b in bb_raw:
+                key = b.get("key", "")
+                val = b.get("value", 0)
+                if key and val:
+                    bb[key] = val
+        elif isinstance(bb_raw, dict):
+            bb = {k: v for k, v in bb_raw.items() if v}
+
         skill_list.append(SkillData(
             skill_index=i + 1,
             name=lv.get("name", ""),
@@ -292,6 +305,7 @@ def load_operator(name: str) -> OperatorData:
             sp_type=sp.get("spType", ""),
             duration=float(dur),
             description=lv.get("description", "")[:80],
+            blackboard=bb,
         ))
 
     return OperatorData(
