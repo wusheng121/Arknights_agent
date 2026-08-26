@@ -156,3 +156,9 @@
 | MuMu 模拟器 | 游戏运行 | `127.0.0.1:16384` |
 | DeepSeek API | LLM 大脑 | `.env` DEEPSEEK_API_KEY |
 | 通义千问-VL | VLM 感知 | `.env` VLM_API_KEY |
+
+1. 模拟器 V3: 加更多技能效果（范围扩大/阻挡增加）→ 让 sim 能真正分胜负
+2. LLM + sim 闭环: 生成→验证→修正→真机
+3. Tier 2 自反思记忆: 结构化失败记录
+4. 实时感知: MAA Python API 绑定 (click + screencap)
+5. AI 主播: TTS + VTube + OBS + 弹幕
