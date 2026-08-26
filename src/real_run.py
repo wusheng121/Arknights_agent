@@ -384,7 +384,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if _battle_started:
             continue
         # 18 秒后 ADB tap (编队通常 10-15 秒完成)
-        if not _adb_tapped and _time.time() - _start_time > 18:
+        if not _adb_tapped and _time.time() - _start_time > 25:
             log.info("编队后 10 秒未进战斗, ADB tap 开始作战...")
             _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
             if _t is not None:
@@ -408,6 +408,34 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     await client.wait_done(timeout=300)
     log.info("Copilot 完成")
+
+    # 如果 MAA 没进战斗(BattleStartAll 失败),ADB tap 开始作战
+    if not _battle_started:
+        log.info("MAA 未能开始战斗,ADB tap fallback...")
+        _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
+        if _t is not None:
+            _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
+            for _retry in range(5):
+                _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+                _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+                _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+                if _img is None:
+                    await asyncio.sleep(2)
+                    continue
+                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+                _, _mv, _, _ml = _cv2.minMaxLoc(_res)
+                if _mv > 0.8:
+                    _cx = _ml[0] + _ts.shape[1] // 2
+                    _cy = _ml[1] + _ts.shape[0] // 2
+                    log.info("  ADB tap 开始作战(%d,%d) score=%.3f", _cx, _cy, _mv)
+                    _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
+                    await asyncio.sleep(5)
+                    # 重新提交 Copilot 任务执行 actions
+                    await client.append("Copilot", {"filename": job_path, "formation": False, "formation_index": 0})
+                    await client.start()
+                    break
+                log.info("  未找到开始作战按钮(%d/5)", _retry+1)
+                await asyncio.sleep(2)
 
     # 胜负检测: 截图匹配 Stars 模板
     await asyncio.sleep(3)

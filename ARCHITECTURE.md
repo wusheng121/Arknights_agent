@@ -286,17 +286,119 @@ while client.running():
 
 正确做法：**保留全部 actions，检测技能状态用于分析和未来的主动干预**。
 
-## 10. 数据源更新
+## 10. 微型模拟器方案（Tier 1.5/2 的钥匙）
 
-| 数据源 | 用途 | 位置 | 状态 |
-|--------|------|------|------|
-| MAA 安装 | 执行/感知/模板 | `C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\` | ✅ |
-| MAA 源码 | 参考/编译 | `C:\demo\MaaAssistantArknights-dev-v2\` | ✅ |
-| ArknightsGameData | 游戏数据 | `data/gamedata/` | ✅ |
-| prts.wiki | 补充数据 | `https://prts.wiki/api.php` | ✅ |
-| **prts.plus API** | **专家作业** | `https://prts.maa.plus/copilot/query` | ✅ |
-| **本地专家作业** | **RAG 检索** | `data/expert_jobs/` (255 关卡 1365 份) | ✅ |
-| MuMu 模拟器 | 游戏运行 | `127.0.0.1:16384` | ✅ |
-| DeepSeek API | LLM 大脑 | `.env` DEEPSEEK_API_KEY | ✅ |
-| 通义千问-VL | VLM 感知 | `.env` VLM_API_KEY | ✅ |
-| ChromaDB | 向量库 | 本地 | ✅ 已安装 |
+### 10.1 为什么需要模拟器
+
+| 没有模拟器 | 有模拟器 |
+|-----------|---------|
+| 每条 lesson 真机跑一局（分钟级） | sim 跑 ms 级 → 1000x 加速 |
+| 不能验证作业合理性 | deploy → step → 看结果 |
+| 失败后只有屏幕截图，难定位根因 | 结构化事件轨迹，直指根因 |
+| 不能测试替代方案 | 反事实查询："如果换位置会怎样?" |
+| principles 无法验证 | sim 里跑胜率验证规则对不对 |
+
+### 10.2 核心 6 模块
+
+| 模块 | 简化建模 |
+|------|---------|
+| 网格 | tile 类型（近战/高台/阻挡），坐标 |
+| 敌人 | hp/atk/def/速度/路径/是否存活；路径预定义不用寻路 |
+| 干员 | hp/atk/def/范围(命中哪些 tile)/阻挡数/DP 费用/技能/朝向 |
+| DP | 随时间回复，部署扣费 |
+| 战斗循环 | 离散 tick（0.1s/0.5s 一帧） |
+| 胜负 | 全波清完=赢；漏怪超阈值=输 |
+
+### 10.3 核心循环
+
+```
+step(dt=0.1s):
+  1. DP 回复
+  2. 敌人沿路径移动；被阻挡数未满的干员挡住→停
+  3. 干员攻击范围内的敌人（atk−def, min 1）
+  4. 敌人攻击阻挡它的干员
+  5. 结算死亡（敌人/干员）
+  6. 敌人走到终点→扣血/漏怪
+  7. 按波次时间轴刷新敌人
+  8. 技能 SP 充能（INCREASE_WITH_TIME: +1/s, INCREASE_WHEN_ATTACK: +1/attack）
+  9. 判胜负
+```
+
+### 10.4 LLM 可视化（结构化数据，非像素）
+
+```json
+// 决策点状态快照
+{"tick":40, "dp":12, "lives":3,
+ "enemies":[{"type":"源石虫","pos":[3,5],"hp":80,"dist_to_blue":5}],
+ "operators":[{"name":"夜莺","pos":[2,5],"skill_sp":0,"skill_max_sp":8,
+               "healing_targets":0}]}
+
+// 事件轨迹
+tick 16: 维什戴尔 skill_usage=1 自动开启(skill3弹药制)
+tick 17: Skill action 关闭维什戴尔技能 (开启后1tick就关!)
+tick 21: 逻各斯 Skill 执行但 SP=2/45 (未就绪)
+tick 31: 夜莺 healing_targets=0 (范围覆盖不到友方!)
+tick 40: 漏怪 (夜莺侧无阻挡)
+
+// 失败根因总结
+root_causes:
+  1. 夜莺(2,5)治疗范围无目标 → 无作用
+  2. 维什戴尔技能开启后1tick关闭 → 弹药浪费
+  3. 逻各斯技能SP=2/45时执行 → 无效
+suggestions:
+  1. 夜莺应放(6,4)覆盖塞雷娅+逻各斯
+  2. 维什戴尔去掉Skill action或加kills条件
+  3. 逻各斯Skill加kills条件等SP充满
+```
+
+### 10.5 反事实查询（只有 sim 能做）
+
+LLM 问 sim："如果夜莺放(6,4)会怎样?" → sim 跑一遍 → "治疗覆盖2人，0漏" → LLM 知道(6,4)更好。
+
+### 10.6 数据需求（全部已有）
+
+| 数据 | 来源 | 状态 |
+|------|------|------|
+| 网格/路径/波次 | level JSON + tile JSON | ✅ |
+| 干员属性/范围/技能 | character_table + skill_table + battle_data | ✅ |
+| 敌人属性/路径 | enemy_database + level routes | ✅ |
+| 技能 SP 数值 | skill_table spData (spCost/spInit/spType) | ✅ 但未喂给 LLM |
+| 技能效果数值 | skill_table blackboard | ✅ 但格式复杂，V2 再做 |
+
+### 10.7 实现计划
+
+**Phase 1: 最小模拟器（1-2 周）**
+- AT-7 + 6 个干员
+- V1 不做技能效果（只做普攻+阻挡+移动+DP+波次+胜负）
+- `game_state.py` + `range_calc.py` + `data_loader.py` + `trace_summarizer.py`
+
+**Phase 2: LLM + sim 集成**
+- LLM 生成作业 → sim 验证 → 失败给根因 → LLM 修正
+
+**Phase 3: 反事实查询**
+- LLM 问 sim "如果换位置/技能/干员会怎样"
+
+### 10.8 诚实的天花板
+
+- 简化机制 → sim 策略可能 exploit 简化（sim 赢真机不赢）
+- 需要定期"sim→真机"校准
+- Tier 2 天花板：避免重复错 + 小范围改进，不是发明新策略
+
+## 11. 干员信息喂入问题
+
+### 11.1 当前 LLM 看到的 vs 没看到的
+
+| 数据 | LLM 看到的 | LLM 没看到的（数据有但没喂） |
+|------|-----------|------------------------|
+| 攻击范围 | `范围大(19格5行)` 文字 | `[[0,2],[1,2],...,[3,-1]]` 具体 tile 坐标 |
+| 技能充能 | `CD4s` 文本 | `spCost=50 spInit=40` 精确数值 |
+| 技能持续 | `持续-1s` 文本 | `duration=25.0` 秒数 |
+| SP 充能类型 | 无 | `INCREASE_WITH_TIME` / `INCREASE_WHEN_ATTACK` |
+| 技能效果 | `攻击力+X` X 没填 | `blackboard: [{key:"atk", value:2.0}]` |
+| 干员属性 | 无 | `HP2500 ATK800 DEF200 RES0` |
+
+### 11.2 导致的问题
+
+1. 夜莺无作用：LLM 只看到"范围中(12格3行)"，无法计算从(2,5)朝 Right 是否覆盖友方
+2. 逻各斯技能没好：LLM 只看到 `CD45s`，不知道 `spInit=30`（还需 15 SP ≈ 15 秒）
+3. 维什戴尔秒关：LLM 看到 `持续-1s` 但不知道 -1 意味着"弹药制/可手动关闭"
