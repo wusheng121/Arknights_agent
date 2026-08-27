@@ -40,11 +40,15 @@ class SimOperator:
     attack_time: float
     range_tiles: list[tuple[int, int]]  # absolute tiles
     profession: str
+    sub_profession: str
     is_medic: bool
     skill: SkillData
     sp: int = 0
     skill_active: bool = False
     skill_duration_left: float = 0
+    skill_usage: int = 0  # 0=manual, 1=auto-use, 2=auto-use N times
+    skill_times: int = 1
+    skill_times_used: int = 0
     attack_cooldown: float = 0
     alive: bool = True
 
@@ -94,6 +98,9 @@ class GameState:
         self.red_doors = stage_data["red_doors"]
         self.blue_doors = stage_data["blue_doors"]
         self.initial_cost = stage_data["initial_cost"]
+        self.max_lives = stage_data.get("max_life_points", 3)
+        self.move_multiplier = stage_data.get("move_multiplier", 1.0)
+        self.cost_increase_time = stage_data.get("cost_increase_time", 1.0)
 
         # Build tile lookup
         self.tile_map = {}
@@ -103,7 +110,7 @@ class GameState:
         # State
         self.tick = 0.0
         self.dp = self.initial_cost
-        self.lives = 3
+        self.lives = self.max_lives
         self.operators: list[SimOperator] = []
         self.enemies: list[SimEnemy] = []
         self.events: list[SimEvent] = []
@@ -114,8 +121,11 @@ class GameState:
         # Track deployed positions
         self.deployed_positions: set[tuple[int, int]] = set()
 
-        # DP regen: 1 per second
+        # DP regen
         self.dp_regen_timer = 0.0
+
+        # Game speed (1x or 2x with SpeedUp)
+        self.speed_multiplier = 1
 
     def deploy(self, name: str, col: int, row: int, facing: str, skill_index: int = 1) -> bool:
         """部署干员。返回是否成功。"""
@@ -167,6 +177,7 @@ class GameState:
             block=op_data.block, attack_time=op_data.attack_time,
             range_tiles=range_abs,
             profession=op_data.profession,
+            sub_profession=op_data.sub_profession,
             is_medic=(op_data.profession == "MEDIC"),
             skill=skill or op_data.skills[0] if op_data.skills else None,
             sp=skill.sp_init if skill else 0,
@@ -201,21 +212,27 @@ class GameState:
         """使用技能。"""
         for op in self.operators:
             if op.name == name and op.alive:
-                if not op.skill:
-                    return False
-                if op.sp < op.skill.sp_cost:
-                    self._log("skill_not_ready", oper=name,
-                             sp=op.sp, needed=op.skill.sp_cost)
-                    return False
-                op.sp = 0
-                op.skill_active = True
-                if op.skill.duration > 0:
-                    op.skill_duration_left = op.skill.duration
-                elif op.skill.duration == -1:
-                    op.skill_duration_left = float('inf')
-                self._log("skill_activated", oper=name, skill=op.skill.name)
-                return True
+                return self._activate_skill(op)
         return False
+
+    def _activate_skill(self, op: SimOperator) -> bool:
+        """激活干员技能(内部方法)。"""
+        if not op.skill:
+            return False
+        if op.sp < op.skill.sp_cost:
+            self._log("skill_not_ready", oper=op.name,
+                     sp=op.sp, needed=op.skill.sp_cost)
+            return False
+        op.sp = 0
+        op.skill_active = True
+        op.skill_times_used += 1
+        if op.skill.duration > 0:
+            op.skill_duration_left = op.skill.duration
+        elif op.skill.duration == -1:
+            op.skill_duration_left = float('inf')
+        self._log("skill_activated", oper=op.name, skill=op.skill.name,
+                  usage=op.skill_usage, times_used=op.skill_times_used)
+        return True
 
     def step(self, dt: float = 0.1):
         """推进一个时间步。"""
@@ -226,8 +243,8 @@ class GameState:
 
         # 1. DP regen
         self.dp_regen_timer += dt
-        if self.dp_regen_timer >= 1.0:
-            self.dp_regen_timer -= 1.0
+        if self.dp_regen_timer >= self.cost_increase_time:
+            self.dp_regen_timer -= self.cost_increase_time
             self.dp = min(self.dp + 1, 99)
 
         # 2. Spawn enemies
@@ -255,15 +272,21 @@ class GameState:
                 op.attack_cooldown = op.attack_time
                 self._operator_attack(op)
 
-        # 5. Skill SP regen
+        # 5. Skill SP regen + auto skill activation
         for op in self.operators:
             if not op.alive or not op.skill:
                 continue
-            if op.skill.sp_type == "INCREASE_WITH_TIME" and not op.skill_active:
-                op.sp = min(op.sp + int(dt * 10) / 10, op.skill.sp_cost)
-            elif op.skill.sp_type == "INCREASE_WHEN_ATTACK" and not op.skill_active:
-                # regen on attack, handled in _operator_attack
-                pass
+            if not op.skill_active:
+                if op.skill.sp_type == "INCREASE_WITH_TIME":
+                    op.sp = min(op.sp + int(dt * 10) / 10, op.skill.sp_cost)
+                elif op.skill.sp_type == "INCREASE_WHEN_ATTACK":
+                    pass  # regen on attack, handled in _operator_attack
+
+                # Auto skill activation (skill_usage=1 or 2)
+                if op.skill_usage in (1, 2) and op.sp >= op.skill.sp_cost:
+                    if op.skill_usage == 2 and op.skill_times_used >= op.skill_times:
+                        continue  # Already used all times
+                    self._activate_skill(op)
 
             # Skill duration
             if op.skill_active:
@@ -356,7 +379,7 @@ class GameState:
             enemy.route_progress += 1
             return
 
-        move = enemy.move_speed * dt
+        move = enemy.move_speed * self.move_multiplier * dt
         enemy.segment_progress += move / dist
 
         if enemy.segment_progress >= 1.0:
@@ -377,7 +400,7 @@ class GameState:
         for op in self.operators:
             if not op.alive:
                 continue
-            if op.col == int(enemy.col) and op.row == int(enemy.row):
+            if op.col == round(enemy.col) and op.row == round(enemy.row):
                 # Count how many enemies this operator is blocking
                 blocked_count = sum(1 for e in self.enemies if e.blocked_by == op.name and e.alive)
                 if blocked_count < op.block:
@@ -393,6 +416,10 @@ class GameState:
         attack_time = op.attack_time
         max_targets = 1
 
+        # Centurion guards (群攻卫) attack all blocked enemies
+        if op.sub_profession == "centurion":
+            max_targets = op.block
+
         if op.skill_active and op.skill and op.skill.blackboard:
             bb = op.skill.blackboard
             # ATK bonus (e.g. {"atk": 1.8} means ATK * (1 + 1.8) = 2.8x)
@@ -403,9 +430,9 @@ class GameState:
                 attack_time = max(0.1, op.attack_time + bb["base_attack_time"])
             # Multi-target
             if "attack@max_target" in bb:
-                max_targets = int(bb["attack@max_target"])
+                max_targets = max(max_targets, int(bb["attack@max_target"]))
             if "max_target" in bb:
-                max_targets = int(bb["max_target"])
+                max_targets = max(max_targets, int(bb["max_target"]))
 
         op.attack_cooldown = attack_time
 
@@ -427,7 +454,7 @@ class GameState:
                 target.hp = min(target.hp + heal, target.max_hp)
         else:
             # Attack enemies in range
-            targets = [e for e in self.enemies if e.alive and (int(e.col), int(e.row)) in op.range_tiles]
+            targets = [e for e in self.enemies if e.alive and (round(e.col), round(e.row)) in op.range_tiles]
             if targets:
                 # Attack up to max_targets
                 for target in targets[:max_targets]:
@@ -481,7 +508,7 @@ class GameState:
                 "skill_max_sp": op.skill.sp_cost if op.skill else 0,
                 "skill_ready": op.sp >= (op.skill.sp_cost if op.skill else 0),
                 "skill_active": op.skill_active,
-                "targets_in_range": len([e for e in self.enemies if e.alive and (int(e.col), int(e.row)) in op.range_tiles]),
+                "targets_in_range": len([e for e in self.enemies if e.alive and (round(e.col), round(e.row)) in op.range_tiles]),
                 "healing_targets": len(self._allies_in_range(op)) if op.is_medic else 0,
             } for op in self.operators],
         }
@@ -528,7 +555,7 @@ class GameState:
         """敌人到最近蓝门的曼哈顿距离。"""
         if not self.blue_doors:
             return 999
-        return min(abs(int(enemy.col) - bd[0]) + abs(int(enemy.row) - bd[1]) for bd in self.blue_doors)
+        return min(abs(round(enemy.col) - bd[0]) + abs(round(enemy.row) - bd[1]) for bd in self.blue_doors)
 
 
 def check_condition_feasibility(stage_id: str, job: dict) -> list[str]:
@@ -589,6 +616,7 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
             atype = action.get("type", "")
 
             if atype == "SpeedUp":
+                state.speed_multiplier = 2 if state.speed_multiplier == 1 else 1
                 action_index += 1
                 continue
             elif atype == "SkillDaemon":
@@ -640,6 +668,14 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
                         skill_idx = o.get("skill", 1)
                         break
                 if state.deploy(name, int(loc[0]), int(loc[1]), direction, skill_idx):
+                    # Set skill_usage and skill_times from job
+                    for o in job.get("opers", []):
+                        if o.get("name") == name:
+                            sim_op = state.operators[-1] if state.operators else None
+                            if sim_op and sim_op.name == name:
+                                sim_op.skill_usage = int(o.get("skill_usage", 0) or 0)
+                                sim_op.skill_times = int(o.get("skill_times", 1) or 1)
+                            break
                     # post_delay
                     post_delay = action.get("post_delay", 0)
                     if post_delay:
@@ -726,6 +762,9 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
                 action_index += 1
 
         state.step(tick_interval)
+
+        if state.speed_multiplier > 1:
+            state.step(tick_interval)
 
         if state.game_over:
             break

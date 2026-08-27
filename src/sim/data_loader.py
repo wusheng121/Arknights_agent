@@ -70,6 +70,7 @@ class OperatorData:
     char_id: str
     name: str
     profession: str  # PIONEER/WARRIOR/TANK/SNIPER/CASTER/MEDIC/SUPPORT/SPECIAL
+    sub_profession: str  # centurion, lord, fighter, etc.
     hp: int
     atk: int
     defense: int
@@ -212,9 +213,12 @@ def load_stage(stage_id: str) -> dict:
         elif t.tile_type == "tile_end":
             blue_doors.append((t.col, t.row))
 
-    # Initial cost
+    # Initial cost and other options
     options = level_data.get("options", {})
     initial_cost = int(options.get("initialCost", 10) or 10)
+    max_life_points = int(options.get("maxLifePoint", 3) or 3)
+    move_multiplier = float(options.get("moveMultiplier", 1.0) or 1.0)
+    cost_increase_time = float(options.get("costIncreaseTime", 1.0) or 1.0)
 
     return {
         "stage_id": stage_id,
@@ -227,6 +231,9 @@ def load_stage(stage_id: str) -> dict:
         "red_doors": red_doors,
         "blue_doors": blue_doors,
         "initial_cost": initial_cost,
+        "max_life_points": max_life_points,
+        "move_multiplier": move_multiplier,
+        "cost_increase_time": cost_increase_time,
         "runes": level_data.get("runes", []),
     }
 
@@ -312,6 +319,7 @@ def load_operator(name: str) -> OperatorData:
         char_id=char_id,
         name=name,
         profession=char.get("profession", ""),
+        sub_profession=char.get("subProfessionId", ""),
         hp=hp, atk=atk, defense=defense, res=res,
         block=block, cost=cost, attack_time=attack_time,
         range_tiles=range_tiles,
