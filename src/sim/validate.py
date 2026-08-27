@@ -22,9 +22,14 @@ PROMPT_FIX = """你是明日方舟战术修正师。一份作业在模拟器中�
 - events: 关键事件时间线
 - snapshot: 最后状态快照
 - current_job: 当前作业(operators + actions)
+- condition_issues: 条件可行性问题(如有)
 
 **修正原则:**
 - 根据根因修正: 如果是"医疗无目标"→移动医疗位置; 如果是"技能未就绪"→加kills条件或换技能
+- 条件化修正: 用 kills/costs 条件代替固定时间
+  - 技能没好 → 加 kills=N 条件等 SP 充满
+  - 费用不够 → 加 costs=N 条件等费用
+  - 撤退太早 → 加 kills=N 条件延后
 - 只修改有问题的部分,不要全部重写
 - 保持能用的部分不变
 
@@ -52,7 +57,7 @@ async def validate_and_fix(
     Returns:
         修正后的作业 JSON
     """
-    from src.sim.game_state import run_job
+    from src.sim.game_state import run_job, check_condition_feasibility
 
     current_job = job_data
 
@@ -74,6 +79,11 @@ async def validate_and_fix(
                 if a.get("name") in group_map:
                     a["name"] = group_map[a["name"]]
             job_to_sim["groups"] = []
+
+        # Pre-check condition feasibility
+        issues = check_condition_feasibility(stage_id, job_to_sim)
+        if issues:
+            log.warning("[sim] Condition issues: %s", issues)
 
         # Run simulation
         log.info("[sim] Round %d: simulating job (%d opers, %d actions)...",
@@ -105,6 +115,7 @@ async def validate_and_fix(
                 "actions": current_job.get("actions", []),
             },
             "oper_skills": oper_skills,
+            "condition_issues": issues,
         }, ensure_ascii=False)
 
         resp = await client.chat.completions.create(
