@@ -371,12 +371,12 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
         except Exception as e:
             log.warning("sim 验证跳过: %s", e)
 
-    # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA)
+    # MAA Copilot 一体化: formation + 开始作战 + actions(全给 MAA) + 安全网监控
     await _run_maa_copilot(job_path, job_data, stage)
 
 
 async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") -> None:
-    """MAA Copilot 一体化执行: formation + 开始作战 + actions + 胜负检测。"""
+    """MAA Copilot 一体化执行: formation + 开始作战 + actions + 胜负检测 + 安全网。"""
     import json as _json
     import subprocess as _sp
     import cv2 as _cv2
@@ -392,6 +392,27 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if ev.msg == 20003 and ev.details.get("what") == "CopilotAction":
             _battle_started = True
     client.add_handler(_action_detector)
+
+    # 安全网监控器
+    from src.game.battle_monitor import BattleMonitor
+    _tile_calc = None
+    try:
+        from src.game.tile_calc import TileCalc
+        from src.data.stage_util import get_cache_path as _get_tile_path
+        _tile_dir = os.path.join(MAA, "resource", "Arknights-Tile-Pos")
+        _tile_path = _get_tile_path(_tile_dir, stage, MAA)
+        if _tile_path and os.path.exists(_tile_path):
+            _tile_calc = TileCalc(_tile_path)
+    except Exception:
+        pass
+    _monitor = BattleMonitor(
+        tile_calc=_tile_calc,
+        job_actions=job_data.get("actions", []),
+        check_interval=3.0,
+    )
+    _monitor_events: list = []
+    _monitor.add_event_handler(lambda ev: _monitor_events.append(ev))
+    _monitor_task: asyncio.Task | None = None
 
     ok = await client.connect(ADB, ADDR)
     if not ok:
@@ -412,6 +433,10 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if not client.running():
             break
         if _battle_started:
+            # 战斗已开始 → 启动安全网监控
+            if _monitor_task is None:
+                log.info("=== 安全网监控启动 ===")
+                _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
             continue
         # 18 秒后 ADB tap (编队通常 10-15 秒完成)
         if not _adb_tapped and _time.time() - _start_time > 25:
@@ -438,6 +463,20 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     await client.wait_done(timeout=300)
     log.info("Copilot 完成")
+
+    # 停止安全网监控
+    if _monitor_task is not None:
+        _monitor.stop()
+        try:
+            await asyncio.wait_for(_monitor_task, timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _monitor_task.cancel()
+        _monitor_result = _monitor.get_result()
+        log.info("安全网结果: %s", _monitor_result)
+        if _monitor_events:
+            log.info("安全网事件(%d条):", len(_monitor_events))
+            for ev in _monitor_events:
+                log.info("  [%s] %s", ev.event_type, ev.message)
 
     # 如果 MAA 没进战斗(BattleStartAll 失败),ADB tap 开始作战
     if not _battle_started:
