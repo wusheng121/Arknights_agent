@@ -70,19 +70,39 @@ PROMPT_STEP3_SKILL = """你是明日方舟技能专家。根据干员技能描�
 
 PROMPT_STEP4_ORDER = """你是明日方舟部署调度员。根据干员位置、费用、出怪波次和专家参考,确定部署顺序。
 
-**学习而非照抄:**
-- 如果有 expert_reference: 参考专家的操作序列(谁先下/谁后下/何时撤退/何时开技能)
-- 如果没有: 根据费用和波次推理(低费先下回费,高费等费用够了再下,哪路先出怪先守)
-- 如果部署位可能不够,可以加 Retreat action 撤退已用完的干员
-- 如果需要开技能,加 Skill action (带 kills 条件)
-- 最后可以加 SkillDaemon 自动挂机
+**条件化执行(核心规则):**
+不要用固定时间(pre_delay),用游戏状态条件触发动作。MAA 支持以下条件:
+- kills: 等击杀数达到 N 才执行(如 Skill action 等击杀够了再开)
+- costs: 等费用达到 N 才执行(如 Deploy 等费用够了再下)
+- cost_changes: 等费用变化量达到 N(从上一个 action 起算)
+- cooling: 等 CD 中干员数达到 N
+- elapsed_time: 等时间达到 N 毫秒
+
+**条件化 vs 固定时间:**
+- 好的写法: {"type":"Deploy","name":"维什戴尔","location":[8,1],"direction":"Down","costs":40}
+  → 费用到 40 才部署,适应不同游戏速度
+- 好的写法: {"type":"Skill","name":"维什戴尔","kills":15}
+  → 击杀到 15 才开技能,确保 SP 已充满
+- 坏的写法: {"type":"Deploy","name":"维什戴尔","location":[8,1],"direction":"Down","pre_delay":5000}
+  → 固定等 5 秒,游戏速度变化会出错
+
+**部署逻辑:**
+- 低费先锋先下回费(costs 用实际费用,先锋一般 6-10)
+- 高费输出等费用够了再下(costs=实际费用)
+- 需要撤退时加 Retreat action
+- 需要开技能时加 Skill action,用 kills 条件等 SP 充满
+- 弹药制技能(如维什戴尔3技能)用 skill_usage=1 自动开,不要手动 Skill
+- 最后加 SkillDaemon 挂机
+
+**doc 字段(可选):** 每个 action 可加 doc 描述,如 "doc":"下维什戴尔清高台"
 
 **输入字段说明:**
 - waves: 出怪波次(时间/敌人/路线)
 - deployments: 每个干员的 name/location/direction/cost/skill/is_ground/defends_blue_door
 - expert_reference: 专家作业的操作序列(如果有)
+- principles: 因果原则
 
-只输出 JSON: {"actions":[{"type":"SpeedUp"},{"type":"Deploy","name":"干员名","location":[x,y],"direction":"Right","costs":10}]}
+只输出 JSON: {"actions":[{"type":"SpeedUp"},{"type":"Deploy","name":"干员名","location":[x,y],"direction":"Right","costs":10,"doc":"下先锋回费"},{"type":"Skill","name":"干员名","kills":15,"doc":"击杀够了开技能"},{"type":"SkillDaemon"}]}
 """
 
 
@@ -313,7 +333,15 @@ async def generate_job_pipeline(
             name=a.get("name"),
             location=loc_tuple,
             direction=a.get("direction", "Right"),
+            kills=int(a.get("kills", 0)) if a.get("kills") else 0,
             costs=int(a.get("costs", 0)) if a.get("costs") else 0,
+            cost_changes=int(a.get("cost_changes", 0)) if a.get("cost_changes") else 0,
+            cooling=int(a.get("cooling", -1)) if a.get("cooling") is not None else -1,
+            pre_delay=int(a.get("pre_delay", 0)) if a.get("pre_delay") else 0,
+            post_delay=int(a.get("post_delay", 0)) if a.get("post_delay") else 0,
+            skill_usage=int(a.get("skill_usage")) if a.get("skill_usage") is not None else None,
+            skill_times=int(a.get("skill_times", 1)) if a.get("skill_times") else 1,
+            doc=a.get("doc"),
         ))
 
     doc = CopilotDoc(

@@ -17,13 +17,10 @@ from src.resilience.guarded_call import GuardedCall
 SYSTEM_PROMPT = """你是明日方舟 AI 主播的战斗决策模块。给定当前战局状态,输出「下一个动作」的 JSON,须严格符合 MAA copilot-schema 的单个 action:
 {"type":"Deploy"|"Skill"|"Retreat"|"SpeedUp"|"BulletTime"|"SkillUsage","name":<干员名>,"location":[x,y],"direction":"Left"|"Right"|"Up"|"Down"|"None","kills":<int>,"costs":<int>}
 - Deploy 必填 name/location/direction;Skill/Retreat 填 name;SpeedUp 无需其他字段。
-- 战前/战斗中 cost≥6 时必须 Deploy 一个先锋回费(从 available_operators 选先锋,如桃金娘/德克萨斯/伊内丝/伺夜/夜半),位置 (6,3) 朝 Right(1-7 先锋位);cost≥6 时不要输出 SkillDaemon/SpeedUp。
-- cost<6 时输出 SkillDaemon 等费用回,不要连续 SpeedUp。
-- cost≥12 后 Deploy 输出(狙击/术士/近卫,从 available_operators 选),cost≥20 Deploy 医疗。
-- 从 vlm_desc 提取 cost 数字判断。
-- Deploy 必须用 available_operators 里的干员名,禁止编造;skill_usage=1 自动开技能。
-- 1-7 可部署 Deploy 位(验证过能下场):先锋桃金娘(4,5)Right,德克萨斯(5,5)Left,输出(4,3)Right/(5,3)Left/(4,2)Right,医疗(4,4)Right/(5,4)Left。禁止用 (6,3) 等不可部署位置。
+- 条件化执行: 用 kills(等击杀数)和 costs(等费用)条件触发,不要用 pre_delay 固定时间。
+  例: Deploy 用 costs=实际费用; Skill 用 kills=N 等 SP 充满。
 - 坐标用 MAA 坐标(见 map.ark-nights.com,设置「坐标展示」选 MAA)。
+- 从 available_operators 选干员,禁止编造。
 - 只输出 JSON 对象,不要任何解释或代码块标记。"""
 
 _ACTION_FIELDS = {

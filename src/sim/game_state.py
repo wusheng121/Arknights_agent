@@ -531,6 +531,45 @@ class GameState:
         return min(abs(int(enemy.col) - bd[0]) + abs(int(enemy.row) - bd[1]) for bd in self.blue_doors)
 
 
+def check_condition_feasibility(stage_id: str, job: dict) -> list[str]:
+    """预检条件可行性:在 sim 运行前,检查 actions 里的条件是否可能达成。
+
+    返回问题列表(空=没问题)。
+    """
+    issues = []
+    actions = job.get("actions", [])
+
+    # Load stage to get total enemy count
+    try:
+        stage_data = load_stage(stage_id)
+        total_enemies = len(stage_data["spawns"])
+    except Exception:
+        total_enemies = 999
+
+    for i, a in enumerate(actions):
+        atype = a.get("type", "")
+        kills = a.get("kills", 0)
+        costs = a.get("costs", 0)
+
+        # Check kills condition feasibility
+        if kills and kills > total_enemies:
+            issues.append(f"action[{i}] {atype}: kills={kills} > total_enemies={total_enemies}, 条件不可能达成")
+
+        # Check costs condition feasibility (costs should be reasonable, not > 99)
+        if costs and costs > 99:
+            issues.append(f"action[{i}] {atype}: costs={costs} 过高, DP 不可能达到")
+
+        # Check kills condition on non-Skill actions (kills mainly for Skill/Retreat)
+        if kills and atype == "Deploy":
+            issues.append(f"action[{i}] Deploy: 用 kills={kills} 条件不合理, Deploy 应该用 costs 条件")
+
+        # Check costs condition on Skill actions (costs mainly for Deploy)
+        if costs and atype == "Skill":
+            issues.append(f"action[{i}] Skill: 用 costs={costs} 条件不合理, Skill 应该用 kills 条件")
+
+    return issues
+
+
 def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
     """运行一份作业,返回结果。"""
     stage_data = load_stage(stage_id)
@@ -540,6 +579,8 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
     actions = job.get("actions", [])
     action_index = 0
     tick_interval = 0.1
+    dp_at_last_action = state.dp  # for cost_changes tracking
+    last_action_tick = 0.0  # for elapsed_time tracking
 
     for tick_num in range(max_ticks):
         # Execute actions whose conditions are met
@@ -550,56 +591,137 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
             if atype == "SpeedUp":
                 action_index += 1
                 continue
+            elif atype == "SkillDaemon":
+                action_index += 1
+                continue
             elif atype == "Deploy":
                 name = action.get("name", "")
                 loc = action.get("location", [0, 0])
                 direction = action.get("direction", "Right")
-                # Use action costs if available, otherwise use operator's actual cost
+                # costs condition
                 costs = action.get("costs", 0)
                 if not costs:
-                    # Look up operator cost
                     try:
-                        from src.sim.data_loader import load_operator
                         op_data = load_operator(name)
                         costs = op_data.cost
                     except Exception:
                         costs = 0
                 if costs and state.dp < costs:
                     break  # wait for DP
+                # cost_changes condition
+                cost_changes = action.get("cost_changes", 0)
+                if cost_changes:
+                    dp_change = state.dp - dp_at_last_action
+                    if dp_change < cost_changes:
+                        break
+                # cooling condition
+                cooling = action.get("cooling", -1)
+                if cooling >= 0:
+                    cd_count = sum(1 for op in state.operators if not op.alive)
+                    if cd_count < cooling:
+                        break
+                # elapsed_time condition
+                elapsed_time = action.get("elapsed_time", 0) or action.get("time_elapsed", 0)
+                if elapsed_time:
+                    elapsed_ms = (state.tick - last_action_tick) * 1000
+                    if elapsed_ms < elapsed_time:
+                        break
+                # pre_delay
+                pre_delay = action.get("pre_delay", 0)
+                if pre_delay:
+                    pre_steps = int((pre_delay / 1000.0) / tick_interval)
+                    for _ in range(pre_steps):
+                        state.step(tick_interval)
+                        if state.game_over:
+                            break
                 skill_idx = 1
                 for o in job.get("opers", []):
                     if o.get("name") == name:
                         skill_idx = o.get("skill", 1)
                         break
-                post_delay = action.get('post_delay', 0)
-                if post_delay:
-                    post_delay_s = post_delay / 1000.0
-                    # Step forward for post_delay
-                    steps = int(post_delay_s / tick_interval)
-                    for _ in range(steps):
-                        state.step(tick_interval)
-                        if state.game_over:
-                            break
                 if state.deploy(name, int(loc[0]), int(loc[1]), direction, skill_idx):
+                    # post_delay
+                    post_delay = action.get("post_delay", 0)
+                    if post_delay:
+                        post_steps = int((post_delay / 1000.0) / tick_interval)
+                        for _ in range(post_steps):
+                            state.step(tick_interval)
+                            if state.game_over:
+                                break
+                    dp_at_last_action = state.dp
+                    last_action_tick = state.tick
                     action_index += 1
                 else:
                     break
             elif atype == "Skill":
                 name = action.get("name", "")
+                # kills condition
                 kills = action.get("kills", 0)
                 if kills:
                     killed = sum(1 for e in state.events if e.event == "enemy_killed")
                     if killed < kills:
                         break
+                # cost_changes condition
+                cost_changes = action.get("cost_changes", 0)
+                if cost_changes:
+                    dp_change = state.dp - dp_at_last_action
+                    if dp_change < cost_changes:
+                        break
+                # cooling condition
+                cooling = action.get("cooling", -1)
+                if cooling >= 0:
+                    cd_count = sum(1 for op in state.operators if not op.alive)
+                    if cd_count < cooling:
+                        break
+                # elapsed_time condition
+                elapsed_time = action.get("elapsed_time", 0) or action.get("time_elapsed", 0)
+                if elapsed_time:
+                    elapsed_ms = (state.tick - last_action_tick) * 1000
+                    if elapsed_ms < elapsed_time:
+                        break
+                # pre_delay for Skill
+                pre_delay = action.get("pre_delay", 0)
+                if pre_delay:
+                    pre_steps = int((pre_delay / 1000.0) / tick_interval)
+                    for _ in range(pre_steps):
+                        state.step(tick_interval)
+                        if state.game_over:
+                            break
                 state.use_skill(name)
+                # post_delay for Skill
+                post_delay = action.get("post_delay", 0)
+                if post_delay:
+                    post_steps = int((post_delay / 1000.0) / tick_interval)
+                    for _ in range(post_steps):
+                        state.step(tick_interval)
+                        if state.game_over:
+                            break
+                dp_at_last_action = state.dp
+                last_action_tick = state.tick
                 action_index += 1
             elif atype == "Retreat":
                 name = action.get("name", "")
+                # kills condition
+                kills = action.get("kills", 0)
+                if kills:
+                    killed = sum(1 for e in state.events if e.event == "enemy_killed")
+                    if killed < kills:
+                        break
+                # pre_delay for Retreat
+                pre_delay = action.get("pre_delay", 0)
+                if pre_delay:
+                    pre_steps = int((pre_delay / 1000.0) / tick_interval)
+                    for _ in range(pre_steps):
+                        state.step(tick_interval)
+                        if state.game_over:
+                            break
                 state.retreat(name)
+                dp_at_last_action = state.dp
+                last_action_tick = state.tick
                 action_index += 1
-            elif atype == "SkillDaemon":
+            elif atype == "ResetStopwatch":
+                last_action_tick = state.tick
                 action_index += 1
-                # Let it run
             else:
                 action_index += 1
 
