@@ -387,10 +387,16 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     # 检测 CopilotAction 回调 → 战斗已开始
     _battle_started = False
+    _deploy_action_count = 0
     async def _action_detector(ev):
-        nonlocal _battle_started
+        nonlocal _battle_started, _deploy_action_count
         if ev.msg == 20003 and ev.details.get("what") == "CopilotAction":
             _battle_started = True
+            action = ev.details.get("details", {}).get("action", "")
+            if action == "Deploy":
+                _deploy_action_count += 1
+                log.info("[Deploy] CopilotAction #%d: %s", _deploy_action_count,
+                         ev.details.get("details", {}).get("target", ""))
     client.add_handler(_action_detector)
 
     # 安全网监控器
@@ -412,15 +418,12 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     )
     _monitor_events: list = []
 
-    # AI 主播
-    from src.streamer.streamer import Streamer
-    _streamer = Streamer(mock_danmaku=True, danmaku_interval=20.0)
+    # BattleMonitor 事件 → Streamer 事件总线 (streamer 在后面创建)
+    _streamer = None
     _streamer_started = False
-
-    # BattleMonitor 事件 → Streamer 事件总线
     def _monitor_to_streamer(ev):
-        # BattleEvent → streamer on_battle_event
-        _streamer.on_battle_event(ev)
+        if _streamer:
+            _streamer.on_battle_event(ev)
         _monitor_events.append(ev)
     _monitor.add_event_handler(_monitor_to_streamer)
 
@@ -433,10 +436,29 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     log.info("=== MAA Copilot 一体化(formation + actions) ===")
     await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
+
+    # AI 主播提前启动(不等 Deploy 回调,避免 MAA 完成快导致主播没启动)
+    from src.streamer.streamer import Streamer as _Streamer
+    _streamer = _Streamer(mock_danmaku=True, danmaku_interval=20.0)
+    _streamer_started = False
+    _monitor_to_streamer = lambda ev: (_streamer.on_battle_event(ev), _monitor_events.append(ev))
+    _monitor.add_event_handler(_monitor_to_streamer)
+    _streamer_task = None
+
+    async def _start_streamer_async():
+        """异步启动 AI 主播(不阻塞 MAA)。"""
+        nonlocal _streamer_started
+        await _streamer.start()
+        _streamer_started = True
+        _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
+        log.info("=== AI 主播已启动(异步) ===")
+
     await client.start()
+    _streamer_task = asyncio.create_task(_start_streamer_async())
 
     # 异步监控: 18 秒后 ADB tap 开始作战(足够编队完成)
     _adb_tapped = False
+    _deploy_verified = False
     import time as _time
     _start_time = _time.time()
 
@@ -445,16 +467,10 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if not client.running():
             break
         if _battle_started:
-            # 战斗已开始 → 启动安全网监控 + AI 主播
+            # 战斗已开始 → 启动安全网监控
             if _monitor_task is None:
                 log.info("=== 安全网监控启动 ===")
                 _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
-            if not _streamer_started:
-                log.info("=== AI 主播启动 ===")
-                await _streamer.start()
-                _streamer_started = True
-                _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
-            continue
         # 18 秒后 ADB tap (编队通常 10-15 秒完成)
         if not _adb_tapped and _time.time() - _start_time > 25:
             log.info("编队后 10 秒未进战斗, ADB tap 开始作战...")
@@ -480,6 +496,82 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     await client.wait_done(timeout=300)
     log.info("Copilot 完成")
+
+    # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
+    if _deploy_action_count > 0 and not _streamer_started:
+        log.info("=== AI 主播启动(延迟) ===")
+        await _streamer.start()
+        _streamer_started = True
+        _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
+        if _monitor_task is None:
+            log.info("=== 安全网监控启动(延迟) ===")
+            _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
+
+    # 部署验证: 如果 MAA 发出了 Deploy 但战斗还在进行 → 检查干员是否在场上
+    if _deploy_action_count > 0:
+        await asyncio.sleep(2)
+        _still_in_battle = False
+        try:
+            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+            if _img is not None:
+                _hp = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
+                _ts = _cv2.resize(_hp, (int(_hp.shape[1]*1.5), int(_hp.shape[0]*1.5)))
+                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+                _, _mv, _, _ = _cv2.minMaxLoc(_res)
+                _still_in_battle = _mv > 0.6
+        except Exception:
+            pass
+
+        if _still_in_battle:
+            log.warning("MAA 发出 %d 个 Deploy 但战斗仍在进行,可能部署失败", _deploy_action_count)
+            # 检查是否有干员在场上(检查部署区域是否有 BattleOpersFlag)
+            _has_oper = False
+            try:
+                _flag = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleOpersFlag.png"))
+                _ts2 = _cv2.resize(_flag, (int(_flag.shape[1]*1.5), int(_flag.shape[0]*1.5)))
+                _res2 = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
+                # 如果部署面板还有干员(可部署),说明战斗中没下干员
+                _opers = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
+                _, _omv, _, _ = _cv2.minMaxLoc(_opers)
+                if _omv > 0.7:
+                    _has_oper = True  # 部署面板有干员待部署
+            except Exception:
+                pass
+
+            if _has_oper and _tile_calc:
+                # 手动部署: 找第一个待部署干员,拖到目标位置
+                log.info("=== 手动 ADB 部署 fallback ===")
+                # 从 job 获取部署信息
+                for _a in job_data.get("actions", []):
+                    if _a.get("type") == "Deploy" and _a.get("name"):
+                        _name = _a.get("name")
+                        _loc = _a.get("location", [2, 3])
+                        _dir = _a.get("direction", "Left")
+                        log.info("手动部署 %s @(%s,%s) %s", _name, _loc[0], _loc[1], _dir)
+                        # 找待部署区干员位置(用 BattleOpersFlag 定位)
+                        _r2 = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+                        _arr2 = _np.frombuffer(_r2.stdout, dtype=_np.uint8)
+                        _img2 = _cv2.imdecode(_arr2, _cv2.IMREAD_COLOR)
+                        _flag2 = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleOpersFlag.png"))
+                        _ts3 = _cv2.resize(_flag2, (int(_flag2.shape[1]*1.5), int(_flag2.shape[0]*1.5)))
+                        _res3 = _cv2.matchTemplate(_img2, _ts3, _cv2.TM_CCOEFF_NORMED)
+                        _locs = _np.where(_res3 >= 0.7)
+                        if len(_locs[0]) > 0:
+                            # 取第一个干员位置
+                            _ox = int(_locs[1][0] + _ts3.shape[1] // 2)
+                            _oy = int(_locs[0][0] + _ts3.shape[0] // 2)
+                            # 目标位置
+                            _tx, _ty = _tile_calc.get_tile_screen_pos(_loc[1], _loc[0])
+                            log.info("ADB drag: (%d,%d) → (%d,%d)", _ox, _oy, _tx, _ty)
+                            _sp.run([ADB, "-s", ADDR, "shell", "input", "swipe", str(_ox), str(_oy), str(_tx), str(_ty), "500"])
+                            await asyncio.sleep(2)
+                            # 如果需要设置方向,点对应方向(MAA 坐标系:部署后方向按钮在干员右侧)
+                            log.info("部署完成,等待战斗...")
+                        break
+            else:
+                log.info("战斗仍在进行(有干员在场上或无 tile_calc),等待自然结束")
 
     # 停止安全网监控
     if _monitor_task is not None:
