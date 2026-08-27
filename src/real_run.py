@@ -411,7 +411,19 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         check_interval=3.0,
     )
     _monitor_events: list = []
-    _monitor.add_event_handler(lambda ev: _monitor_events.append(ev))
+
+    # AI 主播
+    from src.streamer.streamer import Streamer
+    _streamer = Streamer(mock_danmaku=True, danmaku_interval=20.0)
+    _streamer_started = False
+
+    # BattleMonitor 事件 → Streamer 事件总线
+    def _monitor_to_streamer(ev):
+        # BattleEvent → streamer on_battle_event
+        _streamer.on_battle_event(ev)
+        _monitor_events.append(ev)
+    _monitor.add_event_handler(_monitor_to_streamer)
+
     _monitor_task: asyncio.Task | None = None
 
     ok = await client.connect(ADB, ADDR)
@@ -433,10 +445,15 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if not client.running():
             break
         if _battle_started:
-            # 战斗已开始 → 启动安全网监控
+            # 战斗已开始 → 启动安全网监控 + AI 主播
             if _monitor_task is None:
                 log.info("=== 安全网监控启动 ===")
                 _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
+            if not _streamer_started:
+                log.info("=== AI 主播启动 ===")
+                await _streamer.start()
+                _streamer_started = True
+                _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
             continue
         # 18 秒后 ADB tap (编队通常 10-15 秒完成)
         if not _adb_tapped and _time.time() - _start_time > 25:
@@ -477,6 +494,18 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.info("安全网事件(%d条):", len(_monitor_events))
             for ev in _monitor_events:
                 log.info("  [%s] %s", ev.event_type, ev.message)
+
+    # 停止 AI 主播
+    if _streamer_started:
+        # 报告战斗结果
+        try:
+            _stars = _detect_battle_result(ADB, ADDR, MAA)
+            _result_str = "win" if _stars >= 2 else "lose"
+            _streamer.on_battle_end(_result_str)
+        except Exception:
+            _streamer.on_battle_end("unknown")
+        await asyncio.sleep(3)
+        await _streamer.stop()
 
     # 如果 MAA 没进战斗(BattleStartAll 失败),ADB tap 开始作战
     if not _battle_started:
