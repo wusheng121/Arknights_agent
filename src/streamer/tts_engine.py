@@ -114,7 +114,7 @@ class TTSEngine:
                 self.bus.publish_now("tts_finished", "", {"text": text})
 
     async def _synthesize_and_play(self, text: str) -> None:
-        """合成语音并播放。"""
+        """合成语音并播放(带重试)。"""
         try:
             import edge_tts
         except ImportError:
@@ -122,44 +122,53 @@ class TTSEngine:
             return
 
         voice = VOICES.get(self.voice_key, self.voice_key)
-        # 生成文件名(用时间戳避免冲突)
-        ts = int(time.time() * 1000)
-        out_path = os.path.join(TTS_DIR, f"tts_{ts}.mp3")
+        # 固定文件名(避免竞争条件: 不删除,每次覆盖)
+        out_path = os.path.join(TTS_DIR, "tts_latest.mp3")
 
-        # 合成
-        communicate = edge_tts.Communicate(text, voice, rate=self.rate)
-        await communicate.save(out_path)
-
-        if not os.path.exists(out_path):
-            log.warning("TTS 文件未生成: %s", out_path)
+        # 合成(带3次重试)
+        for attempt in range(3):
+            try:
+                communicate = edge_tts.Communicate(text, voice, rate=self.rate)
+                await communicate.save(out_path)
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+                    break
+                log.warning("TTS 合成失败(attempt %d): 文件为空", attempt + 1)
+            except Exception as e:
+                log.warning("TTS 合成异常(attempt %d): %s", attempt + 1, e)
+                await asyncio.sleep(1)
+        else:
+            log.warning("TTS 合成3次重试均失败,跳过: %s", text[:30])
             return
 
-        # 播放 (winsound 不支持 mp3,用 subprocess 调用)
+        # 播放(同步,播完才返回)
         await self._play_audio(out_path)
 
-        # 清理
-        try:
-            os.remove(out_path)
-        except Exception:
-            pass
-
     async def _play_audio(self, path: str) -> None:
-        """播放音频文件。"""
-        import subprocess
+        """同步播放音频文件(MCI,播完才返回)。"""
+        import ctypes
         import sys
 
-        if sys.platform == "win32":
-            # Windows: 用 start 命令播放 (等待播放完成)
-            # /wait 让进程等待播放结束
-            subprocess.run(
-                ["cmd", "/c", "start", "/wait", "", path],
-                capture_output=True,
-                timeout=30,
-            )
-        else:
-            # Linux/Mac: 用 aplay/afplay
+        if sys.platform != "win32":
+            import subprocess
             player = "aplay" if sys.platform.startswith("linux") else "afplay"
-            subprocess.run([player, path], capture_output=True, timeout=30)
+            subprocess.run([player, path], capture_output=True, timeout=60)
+            return
+
+        # Windows MCI: open → play wait → close (同步,无竞争条件)
+        winmm = ctypes.windll.winmm
+        open_cmd = f'open "{path}" type mpegvideo alias tts_voice'
+        play_cmd = "play tts_voice wait"
+        close_cmd = "close tts_voice"
+
+        r1 = winmm.mciSendStringW(open_cmd, None, 0, 0)
+        if r1 != 0:
+            buf = ctypes.create_unicode_buffer(256)
+            winmm.mciGetErrorStringW(r1, buf, 256)
+            log.warning("MCI open 失败(%d): %s", r1, buf.value)
+            return
+
+        winmm.mciSendStringW(play_cmd, None, 0, 0)
+        winmm.mciSendStringW(close_cmd, None, 0, 0)
 
     def is_speaking(self) -> bool:
         return self._speaking
