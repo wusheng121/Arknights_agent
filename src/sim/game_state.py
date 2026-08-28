@@ -282,8 +282,14 @@ class GameState:
                 elif op.skill.sp_type == "INCREASE_WHEN_ATTACK":
                     pass  # regen on attack, handled in _operator_attack
 
-                # Auto skill activation (skill_usage=1 or 2)
-                if op.skill_usage in (1, 2) and op.sp >= op.skill.sp_cost:
+                # Auto skill activation:
+                # - skill_usage=1 or 2: auto-use when SP full (existing logic)
+                # - skill_type=AUTO with duration>0: auto-activate when SP full
+                # - skill_type=AUTO with duration=0: handled in _operator_attack (next attack), skip here
+                # - skill_type=PASSIVE: always active (skip)
+                is_auto = getattr(op.skill, 'skill_type', 'MANUAL') == 'AUTO'
+                is_next_attack = op.skill.duration == 0
+                if op.sp >= op.skill.sp_cost and (op.skill_usage in (1, 2) or (is_auto and not is_next_attack)):
                     if op.skill_usage == 2 and op.skill_times_used >= op.skill_times:
                         continue  # Already used all times
                     self._activate_skill(op)
@@ -420,11 +426,36 @@ class GameState:
         if op.sub_profession == "centurion":
             max_targets = op.block
 
+        # Auto-cast skill with duration=0 (next attack type):
+        # When SP is full, the next attack gets the skill's blackboard effects,
+        # then SP resets to 0.
+        auto_next_attack = False
+        if (not op.skill_active and op.skill and 
+            getattr(op.skill, 'skill_type', 'MANUAL') == 'AUTO' and
+            op.skill.duration == 0 and op.sp >= op.skill.sp_cost):
+            auto_next_attack = True
+            bb = op.skill.blackboard or {}
+            # Apply effects for this attack only
+            if "atk_scale" in bb:
+                atk = int(op.atk * bb["atk_scale"])
+            if "atk" in bb:
+                atk = int(atk * (1 + bb["atk"]))
+            if "base_attack_time" in bb:
+                attack_time = max(0.1, op.attack_time + bb["base_attack_time"])
+            if "attack@max_target" in bb:
+                max_targets = max(max_targets, int(bb["attack@max_target"]))
+            if "max_target" in bb:
+                max_targets = max(max_targets, int(bb["max_target"]))
+
+        # Active skill effects (duration > 0)
         if op.skill_active and op.skill and op.skill.blackboard:
             bb = op.skill.blackboard
-            # ATK bonus (e.g. {"atk": 1.8} means ATK * (1 + 1.8) = 2.8x)
+            # ATK direct multiplier (e.g. {"atk_scale": 2.9} → atk * 2.9)
+            if "atk_scale" in bb:
+                atk = int(op.atk * bb["atk_scale"])
+            # ATK percentage bonus (e.g. {"atk": 1.8} → atk * (1 + 1.8))
             if "atk" in bb:
-                atk = int(op.atk * (1 + bb["atk"]))
+                atk = int(atk * (1 + bb["atk"]))
             # Attack speed change
             if "base_attack_time" in bb:
                 attack_time = max(0.1, op.attack_time + bb["base_attack_time"])
@@ -439,6 +470,8 @@ class GameState:
         if op.is_medic:
             # Heal lowest HP ally in range
             allies = self._allies_in_range(op)
+            # 过滤掉 max_hp=0 的干员(数据加载异常)
+            allies = [a for a in allies if a.max_hp > 0]
             if allies:
                 target = min(allies, key=lambda a: a.hp / a.max_hp)
                 heal_scale = 1.0
@@ -461,9 +494,9 @@ class GameState:
                     # Damage: physical (atk - def) or depends on profession
                     if op.profession in ("CASTER",):
                         # Caster: magic damage (atk - res, but res is percentage)
-                        damage = max(int(atk * (1 - target.res / 100)), 1)
+                        damage = max(int(atk * (1 - target.res / 100)), int(atk * 0.05))
                     else:
-                        damage = max(atk - target.defense, 1)
+                        damage = max(atk - target.defense, int(atk * 0.05))
                     target.hp -= damage
                     if target.hp <= 0:
                         target.alive = False
@@ -471,6 +504,11 @@ class GameState:
                     # SP regen on attack
                     if op.skill and op.skill.sp_type == "INCREASE_WHEN_ATTACK" and not op.skill_active:
                         op.sp = min(op.sp + 1, op.skill.sp_cost)
+
+        # Auto next-attack skill: reset SP after the attack
+        if auto_next_attack:
+            op.sp = 0
+            self._log("skill_auto_cast", oper=op.name, skill=op.skill.name)
 
     def _allies_in_range(self, op: SimOperator) -> list[SimOperator]:
         """找范围内的友方干员(非自己)。"""
@@ -515,9 +553,9 @@ class GameState:
 
     def get_event_log(self) -> list[dict]:
         """关键事件列表。"""
-        important = ["deploy", "deploy_failed", "skill_activated", "skill_not_ready",
-                     "skill_ended", "enemy_spawn", "enemy_blocked", "enemy_killed",
-                     "enemy_leaked", "operator_died", "game_over", "warning"]
+        important = ["deploy", "deploy_failed", "skill_activated", "skill_auto_cast",
+                     "skill_not_ready", "skill_ended", "enemy_spawn", "enemy_blocked",
+                     "enemy_killed", "enemy_leaked", "operator_died", "game_over", "warning"]
         return [{"tick": round(e.tick, 1), "event": e.event, **e.details}
                 for e in self.events if e.event in important]
 
@@ -780,7 +818,7 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
         "ticks": tick_num,
         "lives_left": state.lives,
         "failure": state.get_failure_analysis(),
-        "events": state.get_event_log()[-50:],
+        "events": state.get_event_log()[-100:],
         "snapshot": state.get_snapshot(),
     }
 
