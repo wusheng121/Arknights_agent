@@ -434,41 +434,56 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         log.error("connect 失败")
         return
 
-    # === UI 导航: 从任意界面导航到编队界面 ===
+    # === UI 导航: 检测游戏状态,必要时启动+导航 ===
     from src.game.ui_navigator import UINavigator
     _navigator = UINavigator()
     _nav_info = _navigator.get_screen_info()
     log.info("当前界面: %s", _nav_info["screen"])
 
-    if _nav_info["screen"] != "formation":
-        log.info("=== 自主导航到编队界面 ===")
-        _nav_ok = _navigator.navigate_to_formation(stage_code=stage)
-        if not _nav_ok:
-            log.warning("导航失败,尝试直接启动 MAA Copilot")
-    else:
-        log.info("已在编队界面,直接启动 MAA")
+    # 如果游戏没在运行(截图失败),启动游戏
+    if not _nav_info.get("has_image"):
+        log.info("=== 游戏未运行,启动游戏 ===")
+        _navigator.launch_game()
+        if not _navigator.wait_for_game_start(timeout=120):
+            log.error("游戏启动失败")
+            return
+
+    # 如果在主界面或未知界面,导航到编队
+    _nav_info = _navigator.get_screen_info()
+    _screen = _nav_info["screen"]
+    if _screen not in ("formation", "battle", "results"):
+        if _screen in ("home", "unknown"):
+            log.info("=== 自主导航到编队界面 ===")
+            if not _navigator.navigate_to_formation(stage_code=stage):
+                log.warning("导航失败,尝试直接启动 MAA Copilot")
+    elif _screen == "results":
+        log.info("=== 关闭结算界面 ===")
+        _navigator.dismiss_results()
 
     log.info("=== MAA Copilot 一体化(formation + actions) ===")
     await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
 
-    # AI 主播提前启动(不等 Deploy 回调,避免 MAA 完成快导致主播没启动)
-    from src.streamer.streamer import Streamer as _Streamer
-    _streamer = _Streamer(mock_danmaku=True, danmaku_interval=20.0)
+    # AI 主播 (暂时关闭,专注修部署问题)
+    _ENABLE_STREAMER = False
+    _streamer = None
     _streamer_started = False
-    _monitor_to_streamer = lambda ev: (_streamer.on_battle_event(ev), _monitor_events.append(ev))
-    _monitor.add_event_handler(_monitor_to_streamer)
     _streamer_task = None
+    if _ENABLE_STREAMER:
+        from src.streamer.streamer import Streamer as _Streamer
+        _streamer = _Streamer(mock_danmaku=True, danmaku_interval=20.0)
+        _streamer_started = False
+        _monitor_to_streamer = lambda ev: (_streamer.on_battle_event(ev), _monitor_events.append(ev))
+        _monitor.add_event_handler(_monitor_to_streamer)
 
-    async def _start_streamer_async():
-        """异步启动 AI 主播(不阻塞 MAA)。"""
-        nonlocal _streamer_started
-        await _streamer.start()
-        _streamer_started = True
-        _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
-        log.info("=== AI 主播已启动(异步) ===")
+        async def _start_streamer_async():
+            """异步启动 AI 主播(不阻塞 MAA)。"""
+            nonlocal _streamer_started
+            await _streamer.start()
+            _streamer_started = True
+            _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
+            log.info("=== AI 主播已启动(异步) ===")
 
-    await client.start()
-    _streamer_task = asyncio.create_task(_start_streamer_async())
+        _streamer_task = asyncio.create_task(_start_streamer_async())
 
     # 异步监控: 18 秒后 ADB tap 开始作战(足够编队完成)
     _adb_tapped = False
@@ -512,7 +527,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     log.info("Copilot 完成")
 
     # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
-    if _deploy_action_count > 0 and not _streamer_started:
+    if _ENABLE_STREAMER and _deploy_action_count > 0 and not _streamer_started:
         log.info("=== AI 主播启动(延迟) ===")
         await _streamer.start()
         _streamer_started = True
@@ -602,7 +617,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
                 log.info("  [%s] %s", ev.event_type, ev.message)
 
     # 停止 AI 主播
-    if _streamer_started:
+    if _ENABLE_STREAMER and _streamer_started:
         # 报告战斗结果
         try:
             _stars = _detect_battle_result(ADB, ADDR, MAA)

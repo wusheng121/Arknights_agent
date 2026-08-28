@@ -115,40 +115,49 @@ class UINavigator:
         if img is None:
             return "unknown"
 
-        # 1. Results screen (Stars)
+        # 1. Results screen (Stars) — 高阈值避免误匹配
         for name in ["stars3", "stars2", "end_action"]:
             t = self._templates.get(name)
             if t is not None:
-                mv, _ = _match(img, t, 0.65)
-                if mv > 0.65:
+                mv, _ = _match(img, t, 0.75)
+                if mv > 0.75:
                     return "results"
 
-        # 2. Battle screen (HP flag)
-        t = self._templates.get("hp_flag")
-        if t is not None:
-            mv, _ = _match(img, t, 0.6)
-            if mv > 0.6:
-                return "battle"
+        # 2. Battle screen — 需要 HP flag AND kills flag 同时匹配(避免主菜单误判)
+        hp_t = self._templates.get("hp_flag")
+        kills_t = self._templates.get("hp_flag")  # 用 hp_flag 做双重检查
+        if hp_t is not None:
+            mv_hp, _ = _match(img, hp_t, 0.75)
+            if mv_hp > 0.75:
+                # 额外检查: 战斗中应该有 opers_flag(部署面板)或 kills_flag
+                opers_t = self._templates.get("opers_flag")
+                if opers_t is not None:
+                    mv_op, _ = _match(img, opers_t, 0.7)
+                    if mv_op > 0.7:
+                        return "battle"
+                # HP flag 很高匹配但无 opers_flag → 可能是战斗中但部署区空
+                if mv_hp > 0.85:
+                    return "battle"
 
         # 3. Formation screen (Battle Start button)
         t = self._templates.get("battle_start")
         if t is not None:
-            mv, pos = _match(img, t, 0.7)
-            if mv > 0.7:
+            mv, pos = _match(img, t, 0.75)
+            if mv > 0.75:
                 return "formation"
 
-        # 4. Home screen (Home button visible)
+        # 4. Home screen — 多模板检测
         t = self._templates.get("home")
         if t is not None:
-            mv, _ = _match(img, t, 0.6)
-            if mv > 0.6:
+            mv, _ = _match(img, t, 0.55)
+            if mv > 0.55:
                 return "home"
 
-        # 5. Check for opers_flag (also indicates formation/battle prep)
+        # 5. Opers flag only (formation without start button visible)
         t = self._templates.get("opers_flag")
         if t is not None:
-            mv, _ = _match(img, t, 0.6)
-            if mv > 0.6:
+            mv, _ = _match(img, t, 0.75)
+            if mv > 0.75:
                 return "formation"
 
         return "unknown"
@@ -231,19 +240,10 @@ class UINavigator:
                 continue
 
             if screen == "home":
-                # 点击"作战"按钮进入关卡选择
-                # 作战按钮通常在主界面左下角
-                # 先尝试用 StartButton1 模板匹配
-                t = self._templates.get("battle_start")
-                if t is not None:
-                    mv, pos = _match(img, t, 0.5)
-                    if pos:
-                        self._adb_tap(*pos)
-                        time.sleep(2)
-                        continue
-                # Fallback: 点击主界面"作战"按钮的固定位置
-                # 1280x720 基准: (156, 564) → 1920x1080: (234, 846)
-                self._adb_tap(234, 846)
+                # 点击"终端/作战"按钮进入关卡选择
+                # MAA GoTerminalStopflag roi=[462, 600, 140, 120] → 中心 (532, 660) in 1280x720
+                # 换算到 1920x1080 (×1.5): (798, 990)
+                self._adb_tap(798, 990)
                 time.sleep(2)
                 continue
 
@@ -303,7 +303,133 @@ class UINavigator:
         log.warning("导航失败: 10 次尝试后仍未到达编队界面")
         return False
 
+    def wait_for_game_start(self, timeout: int = 120) -> bool:
+        """等待游戏启动完成: 加载→点击屏幕→开始游戏→主界面。
+
+        处理 MAA StartUp 任务链的 ADB 等价:
+        1. StartToWakeUp: roi=[520,460,240,100] → 点击屏幕跳过加载
+        2. StartUpConnectingFlag: roi=[0,635,450,85] → 点击"开始游戏"按钮
+        3. StartUp: roi=[227,327,159,152] → 检测到主界面
+
+        Args:
+            timeout: 最大等待秒数
+        Returns:
+            True 如果到达主界面
+        """
+        import time
+        log.info("=== 等待游戏启动 ===")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            img = self.screenshot()
+            if img is None:
+                time.sleep(2)
+                continue
+
+            screen = self.detect_screen(img)
+            log.info("  启动中... 当前界面: %s", screen)
+
+            if screen == "home":
+                log.info("=== 游戏启动完成(主界面) ===")
+                return True
+
+            if screen == "formation" or screen == "battle" or screen == "results":
+                log.info("=== 已在游戏内(%s) ===", screen)
+                return True
+
+            # 1. StartToWakeUp: 点击屏幕中部跳过加载
+            # roi=[520,460,240,100] → 中心 (640,510) in 1280x720 → (960,765) in 1920x1080
+            # 检查是否有加载图标(LoadingIcon roi=[480,210,320,280])
+            loading = self._match(img, _load_template("Battle/BattleFlag/BattleHpFlag.png"), 0.5)[0]
+            # 尝试点击屏幕中心(跳过加载/启动画面)
+            self._adb_tap(960, 540)
+            time.sleep(2)
+
+            # 再次截图检查
+            img2 = self.screenshot()
+            if img2 is not None:
+                screen2 = self.detect_screen(img2)
+                if screen2 == "home" or screen2 == "formation":
+                    log.info("=== 游戏启动完成(%s) ===", screen2)
+                    return True
+
+                # 2. StartUpConnectingFlag: 点击"开始游戏"按钮
+                # roi=[0,635,450,85] → 中心 (225,677) in 1280x720 → (337,1015) in 1920x1080
+                # 在左下角区域点击
+                self._adb_tap(337, 1015)
+                time.sleep(3)
+
+            time.sleep(2)
+
+        log.warning("游戏启动超时(%ds)", timeout)
+        return False
+
+    def launch_game(self) -> bool:
+        """启动明日方舟 app。"""
+        log.info("=== 启动明日方舟 ===")
+        try:
+            subprocess.run(
+                [ADB, "-s", ADDR, "shell", "monkey", "-p", "com.hypergryph.arknights", "1"],
+                capture_output=True, timeout=15,
+            )
+            log.info("启动命令已发送")
+            return True
+        except Exception as e:
+            log.error("启动游戏失败: %s", e)
+            return False
+
+    def wait_for_game_start(self, timeout: int = 120) -> bool:
+        """等待游戏启动完成: 加载→点击屏幕→开始游戏→主界面。
+
+        MAA StartUp 任务链的 ADB 等价:
+        1. StartToWakeUp: roi=[520,460,240,100] → 点击屏幕跳过加载
+        2. StartUpConnectingFlag: roi=[0,635,450,85] → 点击"开始游戏"按钮
+        3. StartUp: roi=[227,327,159,152] → 检测到主界面
+        """
+        import time
+        log.info("=== 等待游戏启动 ===")
+        start_time = time.time()
+        tapped_wake = False
+        tapped_start = False
+
+        while time.time() - start_time < timeout:
+            img = self.screenshot()
+            if img is None:
+                time.sleep(3)
+                continue
+
+            screen = self.detect_screen(img)
+
+            if screen in ("home", "formation", "battle", "results"):
+                log.info("=== 游戏启动完成(%s) ===", screen)
+                return True
+
+            log.info("  启动中... 界面=%s (%.0fs)", screen, time.time() - start_time)
+
+            # 1. 点击屏幕跳过加载画面 (StartToWakeUp)
+            if not tapped_wake:
+                self._adb_tap(960, 540)  # 屏幕中心
+                time.sleep(2)
+                tapped_wake = True
+                continue
+
+            # 2. 点击"开始游戏"按钮 (StartUpConnectingFlag roi=[0,635,450,85])
+            # 中心 (225,677) in 1280x720 → (337,1015) in 1920x1080
+            if not tapped_start:
+                self._adb_tap(337, 1015)
+                time.sleep(3)
+                tapped_start = True
+                continue
+
+            # 3. 循环点击直到到达主界面
+            self._adb_tap(960, 540)
+            time.sleep(3)
+
+        log.warning("游戏启动超时(%ds)", timeout)
+        return False
+
     def cleanup_after_battle(self) -> None:
+        """战斗结束后清理: 关闭结算 → 回到关卡选择。"""
         """战斗结束后清理: 关闭结算 → 回到关卡选择。"""
         img = self.screenshot()
         screen = self.detect_screen(img)
