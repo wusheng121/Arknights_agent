@@ -60,6 +60,7 @@ class SkillData:
     sp_cost: int
     sp_init: int
     sp_type: str  # INCREASE_WITH_TIME / INCREASE_WHEN_ATTACK
+    skill_type: str  # PASSIVE / AUTO / MANUAL
     duration: float  # seconds, -1 = infinite (ammo)
     description: str
     blackboard: dict = None  # key→value (e.g. {"atk": 1.8, "base_attack_time": 2.9})
@@ -180,7 +181,7 @@ def load_stage(stage_id: str) -> dict:
                 life_point_reduce=int(_get_val(ed.get("lifePointReduce")) or 1),
             )
 
-    # Parse waves
+    # Parse waves: 展开 count>1 的 spawn 为单独的定时 spawn
     for wave in level_data.get("waves", []):
         wave_pre = float(wave.get("preDelay", 0))
         for frag in wave.get("fragments", []):
@@ -194,13 +195,15 @@ def load_stage(stage_id: str) -> dict:
                 count = int(action.get("count", 1))
                 interval = float(action.get("interval", 1.0))
                 route_idx = int(action.get("routeIndex", 0))
-                spawns.append(EnemySpawn(
-                    time=abs_time,
-                    enemy_id=enemy_id,
-                    route_index=route_idx,
-                    count=count,
-                    interval=interval,
-                ))
+                # 展开: count=5 interval=2.0 → 5个单独spawn, time=time+0,2,4,6,8
+                for i in range(count):
+                    spawns.append(EnemySpawn(
+                        time=abs_time + i * interval,
+                        enemy_id=enemy_id,
+                        route_index=route_idx,
+                        count=1,
+                        interval=interval,
+                    ))
 
     spawns.sort(key=lambda s: s.time)
 
@@ -310,6 +313,7 @@ def load_operator(name: str) -> OperatorData:
             sp_cost=int(sp.get("spCost", 0) or 0),
             sp_init=int(sp.get("initSp", 0) or 0),
             sp_type=sp.get("spType", ""),
+            skill_type=lv.get("skillType", "MANUAL"),
             duration=float(dur),
             description=lv.get("description", "")[:80],
             blackboard=bb,
