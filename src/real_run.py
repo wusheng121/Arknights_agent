@@ -434,6 +434,20 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         log.error("connect 失败")
         return
 
+    # === UI 导航: 从任意界面导航到编队界面 ===
+    from src.game.ui_navigator import UINavigator
+    _navigator = UINavigator()
+    _nav_info = _navigator.get_screen_info()
+    log.info("当前界面: %s", _nav_info["screen"])
+
+    if _nav_info["screen"] != "formation":
+        log.info("=== 自主导航到编队界面 ===")
+        _nav_ok = _navigator.navigate_to_formation(stage_code=stage)
+        if not _nav_ok:
+            log.warning("导航失败,尝试直接启动 MAA Copilot")
+    else:
+        log.info("已在编队界面,直接启动 MAA")
+
     log.info("=== MAA Copilot 一体化(formation + actions) ===")
     await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
 
@@ -646,6 +660,12 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.info("=== 无法判断胜负(可能未结算) ===")
     except Exception as e:
         log.error("胜负检测失败: %s", e)
+
+    # 清理: 关闭结算界面
+    try:
+        _navigator.cleanup_after_battle()
+    except Exception:
+        pass
 
 
 async def smoke_operbox() -> None:
