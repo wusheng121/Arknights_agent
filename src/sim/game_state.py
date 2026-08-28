@@ -247,15 +247,12 @@ class GameState:
             self.dp_regen_timer -= self.cost_increase_time
             self.dp = min(self.dp + 1, 99)
 
-        # 2. Spawn enemies
-        while self.spawn_index < len(self.spawns):
+        # 2. Spawn enemies (one per step, like real game)
+        if self.spawn_index < len(self.spawns):
             spawn = self.spawns[self.spawn_index]
             if spawn.time <= self.tick:
-                for _ in range(spawn.count):
-                    self._spawn_enemy(spawn)
+                self._spawn_enemy(spawn)
                 self.spawn_index += 1
-            else:
-                break
 
         # 3. Enemy movement
         for enemy in self.enemies:
