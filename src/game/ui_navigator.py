@@ -139,11 +139,18 @@ class UINavigator:
                 if mv_hp > 0.85:
                     return "battle"
 
-        # 3. Formation screen (Battle Start button)
+        # 3. Formation screen (Battle Start button OR Return button + no battle)
         t = self._templates.get("battle_start")
         if t is not None:
             mv, pos = _match(img, t, 0.75)
             if mv > 0.75:
+                return "formation"
+        # Formation sub-screen: Return button visible + opers_flag visible (not in battle)
+        t_ret = self._templates.get("return")
+        if t_ret is not None:
+            mv_ret, _ = _match(img, t_ret, 0.8)
+            if mv_ret > 0.8:
+                # Return button = on a sub-screen, likely formation
                 return "formation"
 
         # 4. Home screen — 多模板检测
