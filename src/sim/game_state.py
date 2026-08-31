@@ -230,6 +230,10 @@ class GameState:
             op.skill_duration_left = op.skill.duration
         elif op.skill.duration == -1:
             op.skill_duration_left = float('inf')
+        elif op.skill.duration == 0 and op.skill.skill_type == 'MANUAL':
+            # MANUAL + duration=0 → toggle (持续到手动关闭, sim里=无限)
+            op.skill_duration_left = float('inf')
+        # else: AUTO + duration=0 → next-attack type, handled by auto_next_attack
         self._log("skill_activated", oper=op.name, skill=op.skill.name,
                   usage=op.skill_usage, times_used=op.skill_times_used)
         return True
@@ -444,7 +448,7 @@ class GameState:
             if "max_target" in bb:
                 max_targets = max(max_targets, int(bb["max_target"]))
 
-        # Active skill effects (duration > 0)
+        # Active skill effects (duration > 0 or toggle)
         if op.skill_active and op.skill and op.skill.blackboard:
             bb = op.skill.blackboard
             # ATK direct multiplier (e.g. {"atk_scale": 2.9} → atk * 2.9)
@@ -453,6 +457,9 @@ class GameState:
             # ATK percentage bonus (e.g. {"atk": 1.8} → atk * (1 + 1.8))
             if "atk" in bb:
                 atk = int(atk * (1 + bb["atk"]))
+            # attack@atk_scale (e.g. {"attack@atk_scale": 1.9} → each attack atk * 1.9)
+            if "attack@atk_scale" in bb:
+                atk = int(atk * bb["attack@atk_scale"])
             # Attack speed change
             if "base_attack_time" in bb:
                 attack_time = max(0.1, op.attack_time + bb["base_attack_time"])
@@ -461,6 +468,10 @@ class GameState:
                 max_targets = max(max_targets, int(bb["attack@max_target"]))
             if "max_target" in bb:
                 max_targets = max(max_targets, int(bb["max_target"]))
+            # Block count increase (e.g. {"block_cnt": 1.0} → block + 1)
+            if "block_cnt" in bb:
+                eff_block = op.block + int(bb["block_cnt"])
+                max_targets = max(max_targets, eff_block)
 
         op.attack_cooldown = attack_time
 
@@ -702,11 +713,16 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
                         state.step(tick_interval)
                         if state.game_over:
                             break
-                skill_idx = 1
+                # MAA skill 编号: 0-indexed (0=一技能, 1=二技能, 2=三技能)
+                # sim skill_index: 1-indexed (1=一技能, 2=二技能, 3=三技能)
+                skill_raw = 0
                 for o in job.get("opers", []):
                     if o.get("name") == name:
-                        skill_idx = o.get("skill", 1)
+                        skill_raw = o.get("skill", 0)
+                        if skill_raw is None:
+                            skill_raw = 0
                         break
+                skill_idx = skill_raw + 1  # 0-indexed → 1-indexed
                 if state.deploy(name, int(loc[0]), int(loc[1]), direction, skill_idx):
                     # Set skill_usage and skill_times from job
                     for o in job.get("opers", []):
