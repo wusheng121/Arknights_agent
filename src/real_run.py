@@ -33,6 +33,110 @@ ADDR = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 log = logging.getLogger(__name__)
 
 
+async def _verify_and_fallback_deploy(adb, addr, maa_path, job_data, tile_calc, cv2, np, sp):
+    """部署验证: 检查干员是否在场上,失败则 ADB 手动部署。
+
+    Returns: True=部署成功/已在场上, False=部署失败
+    """
+    # 1. 截图检查是否还在战斗中
+    try:
+        r = sp.run([adb, "-s", addr, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+        arr = np.frombuffer(r.stdout, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            log.warning("部署验证: 截图失败")
+            return True  # 无法验证,假设成功
+    except Exception:
+        return True
+
+    # 2. 检查是否在战斗中 (HP flag)
+    hp_path = os.path.join(maa_path, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png")
+    hp_templ = cv2.imread(hp_path)
+    if hp_templ is None:
+        return True
+    hp_ts = cv2.resize(hp_templ, (int(hp_templ.shape[1]*1.5), int(hp_templ.shape[0]*1.5)))
+    hp_res = cv2.matchTemplate(img, hp_ts, cv2.TM_CCOEFF_NORMED)
+    _, hp_mv, _, _ = cv2.minMaxLoc(hp_res)
+    in_battle = hp_mv > 0.6
+
+    if not in_battle:
+        log.info("部署验证: 已不在战斗中(HP=%.2f),无需验证", hp_mv)
+        return True
+
+    # 3. 在战斗中 → 检查部署面板是否有可部署干员
+    flag_path = os.path.join(maa_path, "resource", "template", "Battle", "BattleFlag", "BattleOpersFlag.png")
+    flag_templ = cv2.imread(flag_path)
+    if flag_templ is None:
+        return True
+    flag_ts = cv2.resize(flag_templ, (int(flag_templ.shape[1]*1.5), int(flag_templ.shape[0]*1.5)))
+    flag_res = cv2.matchTemplate(img, flag_ts, cv2.TM_CCOEFF_NORMED)
+    _, flag_mv, _, _ = cv2.minMaxLoc(flag_res)
+
+    # 如果部署面板 score < 0.5,可能已经在战斗深处(面板消失),干员应该已部署
+    if flag_mv < 0.5:
+        log.info("部署验证: 部署面板不可见(%.2f),干员可能已部署", flag_mv)
+        return True
+
+    # 4. 部署面板可见 → 检查是否有干员待部署 (可用=未部署)
+    from src.game.cv_perception import CVPerception
+    cv = CVPerception(scale=1.5)
+    opers = cv.update_deployment(img)
+    available_opers = [o for o in opers if o.available and not o.cooling]
+
+    if not available_opers:
+        log.info("部署验证: 无可用干员(可能已全部署或冷却中)")
+        return True
+
+    # 5. 有可用干员 → 可能部署失败 → ADB 手动部署
+    log.warning("部署验证: 发现 %d 个可用干员,可能部署失败! 尝试 ADB 手动部署", len(available_opers))
+
+    if not tile_calc:
+        log.warning("无 tile_calc,无法手动部署")
+        return False
+
+    # 从 job 获取部署信息
+    for action in job_data.get("actions", []):
+        if action.get("type") != "Deploy" or not action.get("name"):
+            continue
+
+        loc = action.get("location", [2, 3])
+        direction = action.get("direction", "Left")
+        name = action.get("name")
+
+        # 获取目标位置屏幕坐标
+        tx, ty = tile_calc.get_tile_screen_pos(loc[1], loc[0])
+
+        # 找第一个可用干员的屏幕位置
+        if available_opers:
+            oper = available_opers[0]
+            ox = oper.rect[0] + oper.rect[2] // 2
+            oy = oper.rect[1] + oper.rect[3] // 2
+
+            log.info("ADB 手动部署 %s: (%d,%d) → (%d,%d) 方向=%s",
+                     name, ox, oy, tx, ty, direction)
+
+            # 拖拽部署
+            sp.run([adb, "-s", addr, "shell", "input", "swipe",
+                    str(ox), str(oy), str(tx), str(ty), "500"])
+            import asyncio
+            await asyncio.sleep(2)
+
+            # 方向选择: 部署后出现方向箭头,点对应方向
+            # 方向按钮在干员周围,偏移约 100-150px
+            dir_offset = {"Left": (-120, 0), "Right": (120, 0), "Up": (0, -120), "Down": (0, 120)}
+            dx, dy = dir_offset.get(direction, (0, 0))
+            dir_x = tx + dx
+            dir_y = ty + dy
+            log.info("ADB 方向选择 %s: (%d,%d)", direction, dir_x, dir_y)
+            sp.run([adb, "-s", addr, "shell", "input", "tap", str(dir_x), str(dir_y)])
+            await asyncio.sleep(1)
+
+            log.info("手动部署完成")
+            return True
+
+    return False
+
+
 async def _ev_printer(ev):
     import json
     m = ev.msg
@@ -500,6 +604,18 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             if _monitor_task is None:
                 log.info("=== 安全网监控启动 ===")
                 _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
+            # 部署验证: Deploy 后 3 秒检查干员是否在场上
+            if _deploy_action_count > 0 and not _deploy_verified:
+                _deploy_verified = True
+                log.info("=== 部署验证(%d个Deploy action) ===", _deploy_action_count)
+                await asyncio.sleep(3)
+                # 截图检查是否还在战斗中
+                _deploy_ok = await _verify_and_fallback_deploy(
+                    ADB, ADDR, MAA, job_data, _tile_calc, _cv2, _np, _sp)
+                if _deploy_ok:
+                    log.info("部署验证通过")
+                else:
+                    log.warning("部署验证失败,已尝试 ADB fallback")
         # 18 秒后 ADB tap (编队通常 10-15 秒完成)
         if not _adb_tapped and _time.time() - _start_time > 25:
             log.info("编队后 10 秒未进战斗, ADB tap 开始作战...")
@@ -535,72 +651,6 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         if _monitor_task is None:
             log.info("=== 安全网监控启动(延迟) ===")
             _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
-
-    # 部署验证: 如果 MAA 发出了 Deploy 但战斗还在进行 → 检查干员是否在场上
-    if _deploy_action_count > 0:
-        await asyncio.sleep(2)
-        _still_in_battle = False
-        try:
-            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-            if _img is not None:
-                _hp = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
-                _ts = _cv2.resize(_hp, (int(_hp.shape[1]*1.5), int(_hp.shape[0]*1.5)))
-                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-                _, _mv, _, _ = _cv2.minMaxLoc(_res)
-                _still_in_battle = _mv > 0.6
-        except Exception:
-            pass
-
-        if _still_in_battle:
-            log.warning("MAA 发出 %d 个 Deploy 但战斗仍在进行,可能部署失败", _deploy_action_count)
-            # 检查是否有干员在场上(检查部署区域是否有 BattleOpersFlag)
-            _has_oper = False
-            try:
-                _flag = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleOpersFlag.png"))
-                _ts2 = _cv2.resize(_flag, (int(_flag.shape[1]*1.5), int(_flag.shape[0]*1.5)))
-                _res2 = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
-                # 如果部署面板还有干员(可部署),说明战斗中没下干员
-                _opers = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
-                _, _omv, _, _ = _cv2.minMaxLoc(_opers)
-                if _omv > 0.7:
-                    _has_oper = True  # 部署面板有干员待部署
-            except Exception:
-                pass
-
-            if _has_oper and _tile_calc:
-                # 手动部署: 找第一个待部署干员,拖到目标位置
-                log.info("=== 手动 ADB 部署 fallback ===")
-                # 从 job 获取部署信息
-                for _a in job_data.get("actions", []):
-                    if _a.get("type") == "Deploy" and _a.get("name"):
-                        _name = _a.get("name")
-                        _loc = _a.get("location", [2, 3])
-                        _dir = _a.get("direction", "Left")
-                        log.info("手动部署 %s @(%s,%s) %s", _name, _loc[0], _loc[1], _dir)
-                        # 找待部署区干员位置(用 BattleOpersFlag 定位)
-                        _r2 = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-                        _arr2 = _np.frombuffer(_r2.stdout, dtype=_np.uint8)
-                        _img2 = _cv2.imdecode(_arr2, _cv2.IMREAD_COLOR)
-                        _flag2 = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleOpersFlag.png"))
-                        _ts3 = _cv2.resize(_flag2, (int(_flag2.shape[1]*1.5), int(_flag2.shape[0]*1.5)))
-                        _res3 = _cv2.matchTemplate(_img2, _ts3, _cv2.TM_CCOEFF_NORMED)
-                        _locs = _np.where(_res3 >= 0.7)
-                        if len(_locs[0]) > 0:
-                            # 取第一个干员位置
-                            _ox = int(_locs[1][0] + _ts3.shape[1] // 2)
-                            _oy = int(_locs[0][0] + _ts3.shape[0] // 2)
-                            # 目标位置
-                            _tx, _ty = _tile_calc.get_tile_screen_pos(_loc[1], _loc[0])
-                            log.info("ADB drag: (%d,%d) → (%d,%d)", _ox, _oy, _tx, _ty)
-                            _sp.run([ADB, "-s", ADDR, "shell", "input", "swipe", str(_ox), str(_oy), str(_tx), str(_ty), "500"])
-                            await asyncio.sleep(2)
-                            # 如果需要设置方向,点对应方向(MAA 坐标系:部署后方向按钮在干员右侧)
-                            log.info("部署完成,等待战斗...")
-                        break
-            else:
-                log.info("战斗仍在进行(有干员在场上或无 tile_calc),等待自然结束")
 
     # 停止安全网监控
     if _monitor_task is not None:
@@ -658,9 +708,13 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     # 胜负检测: 截图匹配 Stars 模板
     await asyncio.sleep(3)
+    _battle_result = "unknown"
+    _battle_stars = 0
     try:
         _stars = _detect_battle_result(ADB, ADDR, MAA)
+        _battle_stars = _stars
         if _stars >= 3:
+            _battle_result = "win"
             log.info("=== 通关! Stars=%d ===", _stars)
             from src.data.stage_util import get_cache_path
             _cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "job_cache"))
@@ -670,11 +724,58 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
                 _json.dump(job_data, f, ensure_ascii=False, indent=2)
             log.info("作业已缓存: %s", _cache_path)
         elif _stars == 0:
+            _battle_result = "lose"
             log.warning("=== 失败(0星), 可能漏怪 ===")
         else:
             log.info("=== 无法判断胜负(可能未结算) ===")
     except Exception as e:
         log.error("胜负检测失败: %s", e)
+
+    # === P3: 真机结果记录到记忆 ===
+    try:
+        from src.sim.memory import MemoryStore, MemoryEntry
+        _mem_store = MemoryStore()
+        _oper_names = [o.get("name", "") for o in job_data.get("opers", [])]
+        _deploy_actions = [
+            {"name": a.get("name", ""), "location": a.get("location", []),
+             "direction": a.get("direction", "")}
+            for a in job_data.get("actions", []) if a.get("type") == "Deploy"
+        ]
+        # 从 BattleMonitor 事件提取异常
+        _anomaly_types = []
+        for ev in _monitor_events:
+            if ev.event_type == "anomaly":
+                _anomaly_types.append(ev.data.get("type", "unknown"))
+
+        # 构建记忆条目
+        if _battle_result == "win":
+            _failure_mode = "clear"
+            _root_cause = ""
+            _lesson = "通关成功，当前作业有效"
+        elif _battle_result == "lose":
+            _failure_mode = "leak" if _anomaly_types else "timeout"
+            _root_cause = "; ".join(_anomaly_types) if _anomaly_types else "unknown"
+            _lesson = f"失败: {_root_cause[:60]}" if _root_cause else "战斗失败，原因不明"
+        else:
+            _failure_mode = "unknown"
+            _root_cause = "无法判断胜负"
+            _lesson = "战斗结果未知"
+
+        _existing = _mem_store.get_stage_memories(stage)
+        _entry = MemoryEntry(
+            stage=stage,
+            attempt=len(_existing) + 1,
+            deployments=_deploy_actions,
+            outcome=_battle_result,
+            failure_mode=_failure_mode,
+            root_cause=_root_cause,
+            lesson=_lesson,
+            generalizable=True,
+        )
+        _mem_store.record(_entry)
+        log.info("=== P3 记忆记录: %s %s (%s) ===", _battle_result, _failure_mode, _lesson[:40])
+    except Exception as e:
+        log.warning("P3 记忆记录失败: %s", e)
 
     # 清理: 关闭结算界面
     try:
