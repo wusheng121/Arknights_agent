@@ -556,6 +556,11 @@ class GameState:
         return [{"tick": round(e.tick, 1), "event": e.event, **e.details}
                 for e in self.events if e.event in important]
 
+    def get_event_log_all(self) -> list[dict]:
+        """全部事件(不过滤,不截断)。"""
+        return [{"tick": round(e.tick, 1), "event": e.event, **e.details}
+                for e in self.events]
+
     def get_failure_analysis(self) -> dict:
         """自动根因分析。"""
         if not self.game_over:
@@ -815,7 +820,7 @@ def run_job(stage_id: str, job: dict, max_ticks: int = 5000) -> dict:
         "ticks": tick_num,
         "lives_left": state.lives,
         "failure": state.get_failure_analysis(),
-        "events": state.get_event_log()[-100:],
+        "events": state.get_event_log_all(),
         "snapshot": state.get_snapshot(),
     }
 
