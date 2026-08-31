@@ -190,7 +190,7 @@ class UINavigator:
         return screen2 != "results"
 
     def return_to_home(self) -> bool:
-        """从任意界面回到主界面。"""
+        """从任意界面回到主界面。只用 Return 按钮,不按 back key。"""
         for _ in range(5):
             img = self.screenshot()
             screen = self.detect_screen(img)
@@ -202,7 +202,7 @@ class UINavigator:
             if screen == "battle":
                 log.warning("在战斗中,无法返回主界面")
                 return False
-            # Tap return button or back
+            # 只用 Return 按钮导航 (不按 back key,会触发退出游戏)
             t = self._templates.get("return")
             if t is not None:
                 mv, pos = _match(img, t, 0.6)
@@ -210,9 +210,9 @@ class UINavigator:
                     self._adb_tap(*pos)
                     time.sleep(1.5)
                     continue
-            # Try pressing back key
-            subprocess.run([ADB, "-s", ADDR, "shell", "input", "keyevent", "4"], capture_output=True, timeout=5)
-            time.sleep(1.5)
+            # 找不到 Return 按钮,无法导航
+            log.warning("找不到 Return 按钮,无法返回主界面")
+            break
 
         return self.detect_screen() == "home"
 
@@ -276,36 +276,9 @@ class UINavigator:
                         time.sleep(2)
                         continue
 
-                # 3. 如果知道关卡代码,尝试搜索
-                if stage_code:
-                    # 点击搜索框 → 输入关卡代码 → 选择
-                    # 搜索按钮通常在右上角
-                    self._adb_tap(1750, 150)  # 搜索按钮位置
-                    time.sleep(1)
-                    # 输入关卡代码
-                    subprocess.run(
-                        [ADB, "-s", ADDR, "shell", "input", "text", stage_code.replace("-", "")],
-                        capture_output=True, timeout=5,
-                    )
-                    time.sleep(1)
-                    # 点击搜索结果
-                    self._adb_tap(960, 400)
-                    time.sleep(2)
-                    # 点击进入作战
-                    t = self._templates.get("battle_start")
-                    if t is not None:
-                        img2 = self.screenshot()
-                        mv, pos = _match(img2, t, 0.6)
-                        if pos:
-                            self._adb_tap(*pos)
-                            time.sleep(2)
-                            continue
-                    continue
-
-                # 4. Fallback: 点击屏幕中央(可能有关卡列表)
-                self._adb_tap(960, 540)
-                time.sleep(2)
-                continue
+                # 3. 找不到关卡 → 导航交给 MAA Custom task
+                log.info("未找到关卡入口,导航将交给 MAA")
+                break
 
         log.warning("导航失败: 10 次尝试后仍未到达编队界面")
         return False
