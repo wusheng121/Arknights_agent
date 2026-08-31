@@ -555,6 +555,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     # 如果在主界面或未知界面,导航到编队
     _nav_info = _navigator.get_screen_info()
     _screen = _nav_info["screen"]
+    log.info("当前界面: %s", _screen)
     if _screen not in ("formation", "battle", "results"):
         if _screen in ("home", "unknown"):
             log.info("=== 自主导航到编队界面 ===")
@@ -563,9 +564,43 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
     elif _screen == "results":
         log.info("=== 关闭结算界面 ===")
         _navigator.dismiss_results()
+    elif _screen == "formation":
+        # 在编队界面 → 按 Return 回到关卡详情界面(MAA 需要从那里开始)
+        log.info("=== 在编队界面,按 Return 回到关卡详情 ===")
+        _t_ret = _cv2.imread(os.path.join(MAA, "resource", "template", "ReturnButton", "Return.png"))
+        if _t_ret is not None:
+            _ts_ret = _cv2.resize(_t_ret, (int(_t_ret.shape[1]*1.5), int(_t_ret.shape[0]*1.5)))
+            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+            if _img is not None:
+                _res = _cv2.matchTemplate(_img, _ts_ret, _cv2.TM_CCOEFF_NORMED)
+                _, _mv, _, _ml = _cv2.minMaxLoc(_res)
+                if _mv > 0.8:
+                    _cx = _ml[0] + _ts_ret.shape[1] // 2
+                    _cy = _ml[1] + _ts_ret.shape[0] // 2
+                    log.info("  ADB tap Return (%d,%d) score=%.3f", _cx, _cy, _mv)
+                    _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
+                    import time as _t
+                    _t.sleep(2)
+                    log.info("  已回到关卡详情界面")
 
-    log.info("=== MAA Copilot 一体化(formation + actions) ===")
-    await client.append("Copilot", {"filename": job_path, "formation": True, "formation_index": 0})
+    log.info("=== MAA 导航 + Copilot ===")
+    # Step 1: Custom task 导航到 1-7 关卡 (MAA 用 OCR 找 "1-7" 文字)
+    # MAA 有专门的 "1-7" 任务: OCR检测→滑动找→点击进入
+    _stage_nav_task = "1-7"  # MAA 内置的关卡导航任务名
+    # 对于其他关卡, 用 stage_code 作为导航任务名
+    if stage != "1-7":
+        _stage_nav_task = stage  # 如 "1-8", "2-1" 等
+    await client.append("Custom", {
+        "task_names": [_stage_nav_task],
+    })
+    # Step 2: Copilot 编队 + 战斗 + actions
+    await client.append("Copilot", {
+        "filename": job_path,
+        "formation": True,
+        "formation_index": 0,
+    })
 
     # AI 主播 (暂时关闭,专注修部署问题)
     _ENABLE_STREAMER = False
@@ -588,6 +623,9 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.info("=== AI 主播已启动(异步) ===")
 
         _streamer_task = asyncio.create_task(_start_streamer_async())
+
+    # 启动 MAA 任务 (Custom 导航 + Copilot 编队+战斗)
+    await client.start()
 
     # 异步监控: 18 秒后 ADB tap 开始作战(足够编队完成)
     _adb_tapped = False
@@ -639,8 +677,45 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
                         log.info("  未找到开始作战按钮, 等待 MAA 自己处理")
                         _adb_tapped = True  # 不再重试
 
-    await client.wait_done(timeout=300)
-    log.info("Copilot 完成")
+    await client.wait_done(timeout=120)
+    log.info("MAA 任务完成")
+
+    # MAA Copilot (filename 模式) 不等战斗结束, 需要手动等待
+    # 检查是否还在战斗中, 如果是则等待战斗结束
+    _battle_wait_start = _time.time()
+    while _time.time() - _battle_wait_start < 300:
+        try:
+            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+            if _img is None:
+                break
+            # 检查是否在战斗中 (HP flag)
+            _hp = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
+            _ts = _cv2.resize(_hp, (int(_hp.shape[1]*1.5), int(_hp.shape[0]*1.5)))
+            _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+            _, _mv, _, _ = _cv2.minMaxLoc(_res)
+            if _mv < 0.6:
+                # 不在战斗中了,检查是否是结算界面
+                _stars_path = os.path.join(MAA, "resource", "template", "Battle", "StageDrops", "StageDrops-Stars-3.png")
+                _stars_t = _cv2.imread(_stars_path)
+                if _stars_t is not None:
+                    _ts2 = _cv2.resize(_stars_t, (int(_stars_t.shape[1]*1.5), int(_stars_t.shape[0]*1.5)))
+                    _res2 = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
+                    _, _smv, _, _ = _cv2.minMaxLoc(_res2)
+                    if _smv > 0.65:
+                        log.info("检测到结算界面 (Stars=%.2f)", _smv)
+                        break
+                # 也可能战斗失败
+                log.info("不在战斗中 (HP=%.2f), 等待结算...", _mv)
+                await asyncio.sleep(3)
+                break
+            # 还在战斗中,继续等
+            if int(_time.time() - _battle_wait_start) % 30 == 0:
+                log.info("战斗中... (%.0fs)", _time.time() - _battle_wait_start)
+        except Exception:
+            break
+        await asyncio.sleep(5)
 
     # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
     if _ENABLE_STREAMER and _deploy_action_count > 0 and not _streamer_started:
@@ -678,33 +753,8 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         await asyncio.sleep(3)
         await _streamer.stop()
 
-    # 如果 MAA 没进战斗(BattleStartAll 失败),ADB tap 开始作战
-    if not _battle_started:
-        log.info("MAA 未能开始战斗,ADB tap fallback...")
-        _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
-        if _t is not None:
-            _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
-            for _retry in range(5):
-                _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-                _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-                _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-                if _img is None:
-                    await asyncio.sleep(2)
-                    continue
-                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-                _, _mv, _, _ml = _cv2.minMaxLoc(_res)
-                if _mv > 0.8:
-                    _cx = _ml[0] + _ts.shape[1] // 2
-                    _cy = _ml[1] + _ts.shape[0] // 2
-                    log.info("  ADB tap 开始作战(%d,%d) score=%.3f", _cx, _cy, _mv)
-                    _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
-                    await asyncio.sleep(5)
-                    # 重新提交 Copilot 任务执行 actions
-                    await client.append("Copilot", {"filename": job_path, "formation": False, "formation_index": 0})
-                    await client.start()
-                    break
-                log.info("  未找到开始作战按钮(%d/5)", _retry+1)
-                await asyncio.sleep(2)
+    # MAA copilot_list 模式会自己处理导航+开始战斗+等待结束
+    # 不再需要 ADB tap fallback
 
     # 胜负检测: 截图匹配 Stars 模板
     await asyncio.sleep(3)
