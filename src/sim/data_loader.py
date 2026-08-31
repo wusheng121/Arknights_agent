@@ -198,6 +198,9 @@ def load_stage(stage_id: str) -> dict:
             frag_last_spawn_time = frag_start  # 跟踪这个 fragment 最后一个 spawn 时间
 
             for action in frag.get("actions", []):
+                # 只处理 SPAWN 类型的 action (跳过 PREVIEW_CURSOR 等)
+                if action.get("actionType", "SPAWN") != "SPAWN":
+                    continue
                 act_pre = float(action.get("preDelay", 0))
                 abs_time = frag_start + act_pre
                 enemy_id = action.get("key", "")
