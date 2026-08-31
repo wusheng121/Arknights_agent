@@ -552,21 +552,16 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.error("游戏启动失败")
             return
 
-    # 如果在主界面或未知界面,导航到编队
+    # 检测当前界面: 只处理需要手动处理的,导航交给 MAA Custom task
     _nav_info = _navigator.get_screen_info()
     _screen = _nav_info["screen"]
     log.info("当前界面: %s", _screen)
-    if _screen not in ("formation", "battle", "results"):
-        if _screen in ("home", "unknown"):
-            log.info("=== 自主导航到编队界面 ===")
-            if not _navigator.navigate_to_formation(stage_code=stage):
-                log.warning("导航失败,尝试直接启动 MAA Copilot")
-    elif _screen == "results":
+    if _screen == "results":
         log.info("=== 关闭结算界面 ===")
         _navigator.dismiss_results()
     elif _screen == "formation":
-        # 在编队界面 → 按 Return 回到关卡详情界面(MAA 需要从那里开始)
-        log.info("=== 在编队界面,按 Return 回到关卡详情 ===")
+        # 在编队子界面 → 按 Return 回到关卡详情界面(MAA 需要从那里开始导航)
+        log.info("=== 在编队子界面,按 Return ===")
         _t_ret = _cv2.imread(os.path.join(MAA, "resource", "template", "ReturnButton", "Return.png"))
         if _t_ret is not None:
             _ts_ret = _cv2.resize(_t_ret, (int(_t_ret.shape[1]*1.5), int(_t_ret.shape[0]*1.5)))
@@ -583,139 +578,113 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
                     _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
                     import time as _t
                     _t.sleep(2)
-                    log.info("  已回到关卡详情界面")
+    # home / unknown / battle → 不做任何事,直接让 MAA Custom task 导航
 
     log.info("=== MAA 导航 + Copilot ===")
-    # Step 1: Custom task 导航到 1-7 关卡 (MAA 用 OCR 找 "1-7" 文字)
-    # MAA 有专门的 "1-7" 任务: OCR检测→滑动找→点击进入
-    _stage_nav_task = "1-7"  # MAA 内置的关卡导航任务名
-    # 对于其他关卡, 用 stage_code 作为导航任务名
+    _stage_nav_task = "1-7"
     if stage != "1-7":
-        _stage_nav_task = stage  # 如 "1-8", "2-1" 等
-    await client.append("Custom", {
-        "task_names": [_stage_nav_task],
-    })
-    # Step 2: Copilot 编队 + 战斗 + actions
+        _stage_nav_task = stage
+    await client.append("Custom", {"task_names": [_stage_nav_task]})
     await client.append("Copilot", {
         "filename": job_path,
         "formation": True,
         "formation_index": 0,
     })
 
-    # AI 主播 (暂时关闭,专注修部署问题)
     _ENABLE_STREAMER = False
     _streamer = None
     _streamer_started = False
-    _streamer_task = None
-    if _ENABLE_STREAMER:
-        from src.streamer.streamer import Streamer as _Streamer
-        _streamer = _Streamer(mock_danmaku=True, danmaku_interval=20.0)
-        _streamer_started = False
-        _monitor_to_streamer = lambda ev: (_streamer.on_battle_event(ev), _monitor_events.append(ev))
-        _monitor.add_event_handler(_monitor_to_streamer)
 
-        async def _start_streamer_async():
-            """异步启动 AI 主播(不阻塞 MAA)。"""
-            nonlocal _streamer_started
-            await _streamer.start()
-            _streamer_started = True
-            _streamer.on_battle_start(stage, oper_count=len(job_data.get("opers", [])))
-            log.info("=== AI 主播已启动(异步) ===")
-
-        _streamer_task = asyncio.create_task(_start_streamer_async())
-
-    # 启动 MAA 任务 (Custom 导航 + Copilot 编队+战斗)
     await client.start()
 
-    # 异步监控: 18 秒后 ADB tap 开始作战(足够编队完成)
-    _adb_tapped = False
-    _deploy_verified = False
+    # 等待 MAA 完成
     import time as _time
     _start_time = _time.time()
-
     while True:
         await asyncio.sleep(0.5)
         if not client.running():
             break
-        if _battle_started:
-            # 战斗已开始 → 启动安全网监控
-            if _monitor_task is None:
-                log.info("=== 安全网监控启动 ===")
-                _monitor_task = asyncio.create_task(_monitor.monitor_loop(timeout=300))
-            # 部署验证: Deploy 后 3 秒检查干员是否在场上
-            if _deploy_action_count > 0 and not _deploy_verified:
-                _deploy_verified = True
-                log.info("=== 部署验证(%d个Deploy action) ===", _deploy_action_count)
-                await asyncio.sleep(3)
-                # 截图检查是否还在战斗中
-                _deploy_ok = await _verify_and_fallback_deploy(
-                    ADB, ADDR, MAA, job_data, _tile_calc, _cv2, _np, _sp)
-                if _deploy_ok:
-                    log.info("部署验证通过")
-                else:
-                    log.warning("部署验证失败,已尝试 ADB fallback")
-        # 18 秒后 ADB tap (编队通常 10-15 秒完成)
-        if not _adb_tapped and _time.time() - _start_time > 25:
-            log.info("编队后 10 秒未进战斗, ADB tap 开始作战...")
-            _t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "StartButton", "BattleStartNormal.png"))
-            if _t is not None:
-                _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
+        if _time.time() - _start_time > 120:
+            log.warning("MAA 超时(120s), 强制停止")
+            client.stop()
+            break
+
+    log.info("MAA 任务完成 (%.1fs)", _time.time() - _start_time)
+
+    # === 验证1: MAA 完成后,检查是否真的在战斗中 ===
+    # HP flag + opers flag + kills flag 三重验证
+    _in_battle = False
+    try:
+        _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+        _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+        _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+        if _img is not None:
+            _scores = {}
+            for _name, _rel in [("hp", "Battle/BattleFlag/BattleHpFlag.png"),
+                                 ("opers", "Battle/BattleFlag/BattleOpersFlag.png"),
+                                 ("kills", "Battle/BattleFlag/BattleKillsFlag.png")]:
+                _path = os.path.join(MAA, "resource", "template", _rel)
+                _t = _cv2.imread(_path)
+                if _t is not None:
+                    _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
+                    _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+                    _, _mv, _, _ = _cv2.minMaxLoc(_res)
+                    _scores[_name] = _mv
+            log.info("战斗状态: hp=%.2f opers=%.2f kills=%.2f",
+                     _scores.get("hp", 0), _scores.get("opers", 0), _scores.get("kills", 0))
+            if _scores.get("hp", 0) > 0.6 and _scores.get("opers", 0) > 0.7:
+                _in_battle = True
+                log.info("=== 确认在战斗中 ===")
+            else:
+                log.warning("=== 不在战斗中! MAA 导航/编队/开始战斗 可能失败 ===")
+                log.warning("  界面: %s", _navigator.detect_screen(_img))
+    except Exception as e:
+        log.error("战斗状态验证失败: %s", e)
+
+    # === 部署验证 (如果在战斗中) ===
+    if _in_battle:
+        await asyncio.sleep(3)
+        _deploy_ok = await _verify_and_fallback_deploy(
+            ADB, ADDR, MAA, job_data, _tile_calc, _cv2, _np, _sp)
+        log.info("部署验证: %s", "通过" if _deploy_ok else "失败(已尝试ADB fallback)")
+
+    # === 等待战斗结束 (仅在确认在战斗中时) ===
+    if _in_battle:
+        _wait_start = _time.time()
+        _last_hp = 0
+        _no_change = 0
+        while _time.time() - _wait_start < 300:
+            try:
                 _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
                 _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
                 _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-                if _img is not None:
-                    _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-                    _, _mv, _, _ml = _cv2.minMaxLoc(_res)
-                    if _mv > 0.8:
-                        _cx = _ml[0] + _ts.shape[1] // 2
-                        _cy = _ml[1] + _ts.shape[0] // 2
-                        log.info("  ADB tap 开始作战(%d,%d) score=%.3f", _cx, _cy, _mv)
-                        _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
-                        _adb_tapped = True
-                        await asyncio.sleep(5)
+                if _img is None:
+                    break
+                _hp_t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
+                _ts = _cv2.resize(_hp_t, (int(_hp_t.shape[1]*1.5), int(_hp_t.shape[0]*1.5)))
+                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+                _, _hp_mv, _, _ = _cv2.minMaxLoc(_res)
+                if _hp_mv > 0.6:
+                    _elapsed = _time.time() - _wait_start
+                    if int(_elapsed) % 30 == 0:
+                        log.info("战斗中... (%.0fs)", _elapsed)
+                    if abs(_hp_mv - _last_hp) < 0.01:
+                        _no_change += 1
+                        if _no_change > 60:
+                            log.warning("战斗卡住(5分钟无变化),退出")
+                            break
                     else:
-                        log.info("  未找到开始作战按钮, 等待 MAA 自己处理")
-                        _adb_tapped = True  # 不再重试
-
-    await client.wait_done(timeout=120)
-    log.info("MAA 任务完成")
-
-    # MAA Copilot (filename 模式) 不等战斗结束, 需要手动等待
-    # 检查是否还在战斗中, 如果是则等待战斗结束
-    _battle_wait_start = _time.time()
-    while _time.time() - _battle_wait_start < 300:
-        try:
-            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-            if _img is None:
+                        _no_change = 0
+                    _last_hp = _hp_mv
+                else:
+                    log.info("HP flag 消失 (%.2f), 战斗结束", _hp_mv)
+                    break
+            except Exception:
                 break
-            # 检查是否在战斗中 (HP flag)
-            _hp = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
-            _ts = _cv2.resize(_hp, (int(_hp.shape[1]*1.5), int(_hp.shape[0]*1.5)))
-            _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-            _, _mv, _, _ = _cv2.minMaxLoc(_res)
-            if _mv < 0.6:
-                # 不在战斗中了,检查是否是结算界面
-                _stars_path = os.path.join(MAA, "resource", "template", "Battle", "StageDrops", "StageDrops-Stars-3.png")
-                _stars_t = _cv2.imread(_stars_path)
-                if _stars_t is not None:
-                    _ts2 = _cv2.resize(_stars_t, (int(_stars_t.shape[1]*1.5), int(_stars_t.shape[0]*1.5)))
-                    _res2 = _cv2.matchTemplate(_img, _ts2, _cv2.TM_CCOEFF_NORMED)
-                    _, _smv, _, _ = _cv2.minMaxLoc(_res2)
-                    if _smv > 0.65:
-                        log.info("检测到结算界面 (Stars=%.2f)", _smv)
-                        break
-                # 也可能战斗失败
-                log.info("不在战斗中 (HP=%.2f), 等待结算...", _mv)
-                await asyncio.sleep(3)
-                break
-            # 还在战斗中,继续等
-            if int(_time.time() - _battle_wait_start) % 30 == 0:
-                log.info("战斗中... (%.0fs)", _time.time() - _battle_wait_start)
-        except Exception:
-            break
-        await asyncio.sleep(5)
+            await asyncio.sleep(5)
+    else:
+        log.warning("跳过战斗等待 (未确认在战斗中)")
+
 
     # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
     if _ENABLE_STREAMER and _deploy_action_count > 0 and not _streamer_started:
