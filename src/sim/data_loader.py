@@ -181,29 +181,46 @@ def load_stage(stage_id: str) -> dict:
                 life_point_reduce=int(_get_val(ed.get("lifePointReduce")) or 1),
             )
 
-    # Parse waves: 展开 count>1 的 spawn 为单独的定时 spawn
+    # Parse waves: fragment 串行(blockFragment) + 展开 count>1 的 spawn
     for wave in level_data.get("waves", []):
         wave_pre = float(wave.get("preDelay", 0))
+        frag_start = wave_pre  # 第一个 fragment 从 wave 开始算
         for frag in wave.get("fragments", []):
             frag_pre = float(frag.get("preDelay", 0))
+            block_frag = frag.get("blockFragment", None)
+            # blockFragment 不为 False (即 None 或 True) → 串行: 累加时间
+            # blockFragment == False → 并行: 从 wave 开始算
+            if block_frag is False:
+                frag_start = wave_pre + frag_pre
+            else:
+                frag_start = frag_start + frag_pre
+
+            frag_last_spawn_time = frag_start  # 跟踪这个 fragment 最后一个 spawn 时间
+
             for action in frag.get("actions", []):
                 act_pre = float(action.get("preDelay", 0))
-                abs_time = wave_pre + frag_pre + act_pre
+                abs_time = frag_start + act_pre
                 enemy_id = action.get("key", "")
                 if not enemy_id.startswith("enemy_"):
                     continue
                 count = int(action.get("count", 1))
                 interval = float(action.get("interval", 1.0))
                 route_idx = int(action.get("routeIndex", 0))
-                # 展开: count=5 interval=2.0 → 5个单独spawn, time=time+0,2,4,6,8
+                # 展开: count=5 interval=2.0 → 5个单独spawn
                 for i in range(count):
+                    spawn_time = abs_time + i * interval
                     spawns.append(EnemySpawn(
-                        time=abs_time + i * interval,
+                        time=spawn_time,
                         enemy_id=enemy_id,
                         route_index=route_idx,
                         count=1,
                         interval=interval,
                     ))
+                    if spawn_time > frag_last_spawn_time:
+                        frag_last_spawn_time = spawn_time
+
+            # 串行: 下一个 fragment 从这个 fragment 的最后一个 spawn 时间开始
+            frag_start = frag_last_spawn_time
 
     spawns.sort(key=lambda s: s.time)
 
