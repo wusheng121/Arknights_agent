@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(MAA, "Python"))
 from src.brain.llm_client import make_copilot_brain
 from src.core.orchestrator import game_loop
 from src.game.maapy_client import MSG_SUB_TASK_EXTRA_INFO, MaapyClient
-ADB = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+ADB = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
 ADDR = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 
 log = logging.getLogger(__name__)
@@ -552,39 +552,16 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.error("游戏启动失败")
             return
 
-    # 检测当前界面: 只处理需要手动处理的,导航交给 MAA Custom task
-    _nav_info = _navigator.get_screen_info()
-    _screen = _nav_info["screen"]
-    log.info("当前界面: %s", _screen)
-    if _screen == "results":
-        log.info("=== 关闭结算界面 ===")
-        _navigator.dismiss_results()
-    elif _screen == "formation":
-        # 在编队子界面 → 按 Return 回到关卡详情界面(MAA 需要从那里开始导航)
-        log.info("=== 在编队子界面,按 Return ===")
-        _t_ret = _cv2.imread(os.path.join(MAA, "resource", "template", "ReturnButton", "Return.png"))
-        if _t_ret is not None:
-            _ts_ret = _cv2.resize(_t_ret, (int(_t_ret.shape[1]*1.5), int(_t_ret.shape[0]*1.5)))
-            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-            if _img is not None:
-                _res = _cv2.matchTemplate(_img, _ts_ret, _cv2.TM_CCOEFF_NORMED)
-                _, _mv, _, _ml = _cv2.minMaxLoc(_res)
-                if _mv > 0.8:
-                    _cx = _ml[0] + _ts_ret.shape[1] // 2
-                    _cy = _ml[1] + _ts_ret.shape[0] // 2
-                    log.info("  ADB tap Return (%d,%d) score=%.3f", _cx, _cy, _mv)
-                    _sp.run([ADB, "-s", ADDR, "shell", "input", "tap", str(_cx), str(_cy)])
-                    import time as _t
-                    _t.sleep(2)
-    # home / unknown / battle → 不做任何事,直接让 MAA Custom task 导航
-
-    log.info("=== MAA 导航 + Copilot ===")
-    _stage_nav_task = "1-7"
+    # StartUp 直接任务类型 (不是 Custom 包装) + Custom 导航 + Copilot 战斗
+    log.info("=== MAA: StartUp + Custom(1-7) + Copilot ===")
+    # Step 1: StartUp 直接任务类型 (关闭弹窗+确保主界面)
+    await client.append("StartUp", {})
+    # Step 2: Custom 导航到 1-7
+    _stage_nav = "1-7"
     if stage != "1-7":
-        _stage_nav_task = stage
-    await client.append("Custom", {"task_names": [_stage_nav_task]})
+        _stage_nav = stage
+    await client.append("Custom", {"task_names": [_stage_nav]})
+    # Step 3: Copilot 编队 + 战斗 + actions
     await client.append("Copilot", {
         "filename": job_path,
         "formation": True,

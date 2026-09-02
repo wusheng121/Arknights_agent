@@ -399,7 +399,7 @@ if __name__ == "__main__":
             job_data = json.load(f)
 
     maa = os.getenv("MAA_RESOURCE_PATH", r"C:\Users\slient\Downloads\MAA-v6.16.8-win-x64")
-    adb = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+    adb = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
     addr = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 
     asyncio.run(calibrate(stage_id, job_path, job_data, maa, adb, addr))

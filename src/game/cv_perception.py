@@ -375,7 +375,7 @@ if __name__ == "__main__":
     import subprocess
     import sys
 
-    adb = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+    adb = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
     addr = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
     subprocess.run([adb, "-s", addr, "connect", addr], stderr=subprocess.DEVNULL)
     subprocess.run([adb, "-s", addr, "exec-out", "screencap", "-p"], stdout=open("shot_cv.png", "wb"), stderr=subprocess.DEVNULL)

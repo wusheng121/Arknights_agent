@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 MAA_RES = os.getenv("MAA_RESOURCE_PATH", r"C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\resource")
 MAA_ROOT = os.path.dirname(MAA_RES)
-ADB_PATH = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+ADB_PATH = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
 ADB_ADDR = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 TILE_PATH = os.path.join(MAA_RES, "Arknights-Tile-Pos",
                          "main_01-07-obt-main-level_main_01-07.json")

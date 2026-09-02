@@ -32,7 +32,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-ADB = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+ADB = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
 ADDR = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 MAA = os.getenv("MAA_RESOURCE_PATH", r"C:\Users\slient\Downloads\MAA-v6.16.8-win-x64")
 TEMPLATE_DIR = os.path.join(MAA, "resource", "template")
@@ -70,7 +70,7 @@ class UINavigator:
 
     def __init__(self) -> None:
         self._templates = {
-            "home": _load_template("QuickSwitch/Home.png"),
+            "home": _load_template("UiTheme/SwitchTheme/SwitchTheme@ToggleSettingsMenu.png"),
             "return": _load_template("ReturnButton/Return.png"),
             "battle_start": _load_template("Battle/StartButton/BattleStartNormal.png"),
             "hp_flag": _load_template("Battle/BattleFlag/BattleHpFlag.png"),
@@ -79,6 +79,8 @@ class UINavigator:
             "opers_flag": _load_template("Battle/BattleFlag/BattleOpersFlag.png"),
             "end_action": _load_template("Battle/BattleFlag/EndOfAction.png"),
         }
+        # MAA home ROI: [227, 327, 159, 152] in 1280x720 → scaled for 1920x1080
+        self._home_roi = (340, 490, 238, 228)  # x, y, w, h
 
     def screenshot(self) -> np.ndarray | None:
         """ADB 截图。"""
@@ -109,63 +111,85 @@ class UINavigator:
         )
 
     def detect_screen(self, img: np.ndarray | None = None) -> ScreenType:
-        """检测当前界面类型。"""
+        """检测当前界面类型。
+
+        界面类型:
+          home:         主界面 (有Home按钮,无部署面板)
+          formation:    编队/快捷编队界面 (有部署面板,可能有关卡入口)
+          battle:       战斗中 (HP flag高+部署面板)
+          results:      结算界面 (Stars)
+          unknown:      未知界面
+        """
         if img is None:
             img = self.screenshot()
         if img is None:
             return "unknown"
 
-        # 1. Results screen (Stars) — 高阈值避免误匹配
-        for name in ["stars3", "stars2", "end_action"]:
+        # 计算各模板分数
+        scores = {}
+        for name in ["stars3", "stars2", "end_action", "hp_flag", "opers_flag",
+                      "battle_start", "return"]:
             t = self._templates.get(name)
             if t is not None:
-                mv, _ = _match(img, t, 0.75)
-                if mv > 0.75:
-                    return "results"
+                mv, _ = _match(img, t, 0.5)
+                scores[name] = mv
 
-        # 2. Battle screen — 需要 HP flag AND kills flag 同时匹配(避免主菜单误判)
-        hp_t = self._templates.get("hp_flag")
-        kills_t = self._templates.get("hp_flag")  # 用 hp_flag 做双重检查
-        if hp_t is not None:
-            mv_hp, _ = _match(img, hp_t, 0.75)
-            if mv_hp > 0.75:
-                # 额外检查: 战斗中应该有 opers_flag(部署面板)或 kills_flag
-                opers_t = self._templates.get("opers_flag")
-                if opers_t is not None:
-                    mv_op, _ = _match(img, opers_t, 0.7)
-                    if mv_op > 0.7:
-                        return "battle"
-                # HP flag 很高匹配但无 opers_flag → 可能是战斗中但部署区空
-                if mv_hp > 0.85:
-                    return "battle"
+        # Home screen: 用 MAA 的 ToggleSettingsMenu 模板 + ROI 检测
+        home_t = self._templates.get("home")
+        home_score = 0.0
+        if home_t is not None:
+            rx, ry, rw, rh = self._home_roi
+            roi = img[ry:ry+rh, rx:rx+rw]
+            if roi.shape[0] >= home_t.shape[0] and roi.shape[1] >= home_t.shape[1]:
+                res = cv2.matchTemplate(roi, home_t, cv2.TM_CCOEFF_NORMED)
+                _, home_score, _, _ = cv2.minMaxLoc(res)
+        scores["home"] = home_score
 
-        # 3. Formation screen (Battle Start button OR Return button + no battle)
-        t = self._templates.get("battle_start")
-        if t is not None:
-            mv, pos = _match(img, t, 0.75)
-            if mv > 0.75:
-                return "formation"
-        # Formation sub-screen: Return button visible + opers_flag visible (not in battle)
-        t_ret = self._templates.get("return")
-        if t_ret is not None:
-            mv_ret, _ = _match(img, t_ret, 0.8)
-            if mv_ret > 0.8:
-                # Return button = on a sub-screen, likely formation
-                return "formation"
+        # 加载快捷编队模板
+        qf_elite = _load_template("Battle/Formation/BattleQuickFormation/BattleQuickFormation-Elite1.png")
+        if qf_elite is not None:
+            mv_qf, _ = _match(img, qf_elite, 0.6)
+            scores["quick_formation"] = mv_qf
 
-        # 4. Home screen — 多模板检测
-        t = self._templates.get("home")
-        if t is not None:
-            mv, _ = _match(img, t, 0.55)
-            if mv > 0.55:
-                return "home"
+        hp = scores.get("hp_flag", 0)
+        opers = scores.get("opers_flag", 0)
+        home = scores.get("home", 0)
+        ret = scores.get("return", 0)
+        battle_start = scores.get("battle_start", 0)
+        qf = scores.get("quick_formation", 0)
 
-        # 5. Opers flag only (formation without start button visible)
-        t = self._templates.get("opers_flag")
-        if t is not None:
-            mv, _ = _match(img, t, 0.75)
-            if mv > 0.75:
-                return "formation"
+        # 1. Results screen
+        for name in ["stars3", "stars2", "end_action"]:
+            if scores.get(name, 0) > 0.75:
+                return "results"
+
+        # 2. Home screen (优先检测,用 MAA 的 ToggleSettingsMenu 模板,阈值 0.7)
+        if home > 0.7:
+            return "home"
+
+        # 3. Battle screen: HP > 0.75 AND opers > 0.7
+        if hp > 0.75 and opers > 0.7:
+            return "battle"
+
+        # 4. Quick formation screen: quick_formation > 0.7 OR (opers > 0.7 AND home < 0.55)
+        if qf > 0.7 or (opers > 0.7 and home < 0.55):
+            return "formation"
+
+        # 5. Formation with battle start button
+        if battle_start > 0.7:
+            return "formation"
+
+        # 6. Formation with return button
+        if ret > 0.8:
+            return "formation"
+
+        # 7. Opers flag (残留,可能刚关闭编队)
+        if opers > 0.7:
+            return "formation"
+
+        # 8. Home with low score
+        if home > 0.6:
+            return "home"
 
         return "unknown"
 
@@ -190,7 +214,7 @@ class UINavigator:
         return screen2 != "results"
 
     def return_to_home(self) -> bool:
-        """从任意界面回到主界面。只用 Return 按钮,不按 back key。"""
+        """从任意界面回到主界面。只用 Return 按钮和 back key(非主界面时)。"""
         for _ in range(5):
             img = self.screenshot()
             screen = self.detect_screen(img)
@@ -202,19 +226,33 @@ class UINavigator:
             if screen == "battle":
                 log.warning("在战斗中,无法返回主界面")
                 return False
-            # 只用 Return 按钮导航 (不按 back key,会触发退出游戏)
-            t = self._templates.get("return")
-            if t is not None:
-                mv, pos = _match(img, t, 0.6)
-                if pos:
-                    self._adb_tap(*pos)
-                    time.sleep(1.5)
-                    continue
-            # 找不到 Return 按钮,无法导航
-            log.warning("找不到 Return 按钮,无法返回主界面")
-            break
+            # 非主界面 → 用 back key 回上一级 (安全:只有主界面会触发退出游戏)
+            subprocess.run([ADB, "-s", ADDR, "shell", "input", "keyevent", "4"], capture_output=True, timeout=5)
+            time.sleep(2)
+            # 检查是否到了主界面或弹出了退出游戏对话框
+            img2 = self.screenshot()
+            screen2 = self.detect_screen(img2)
+            if screen2 == "home":
+                return True
+            # 如果还在子界面,继续按 back key
+            if screen2 not in ("home",):
+                continue
+            # 到了主界面
+            return True
 
         return self.detect_screen() == "home"
+
+    def esc_sub_screen(self) -> bool:
+        """从子界面(快捷编队/编队)返回上一级。用 back key,安全(非主界面)。"""
+        img = self.screenshot()
+        screen = self.detect_screen(img)
+        if screen in ("home", "battle", "results"):
+            return True  # 不需要 esc
+        # 非主界面 → back key 安全
+        log.info("按 back key 退出子界面 (当前: %s)", screen)
+        subprocess.run([ADB, "-s", ADDR, "shell", "input", "keyevent", "4"], capture_output=True, timeout=5)
+        time.sleep(2)
+        return True
 
     def navigate_to_formation(self, stage_code: str = "") -> bool:
         """从任意界面导航到编队/战斗准备界面。
