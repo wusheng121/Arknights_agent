@@ -125,7 +125,7 @@ if __name__ == "__main__":
     import subprocess
     import sys
 
-    adb = r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe"
+    adb = r"C:\Program Files\Netease\MuMu\nx_main\adb.exe"
     addr = "127.0.0.1:16384"
 
     print("截图中...")

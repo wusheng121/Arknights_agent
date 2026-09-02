@@ -131,7 +131,7 @@ class MockMaapyClient:
 class MaapyClient:
     """真实 MAA 封装(API 已按 asst.py / sample.py 校准)。"""
 
-    def __init__(self, resource_path: str, touch_mode: str = "maatouch") -> None:
+    def __init__(self, resource_path: str, touch_mode: str = "minitouch") -> None:
         # Add patched DLL directory to search path BEFORE importing asst
         import ctypes
         patched_dir = os.path.join(os.path.dirname(resource_path), "MAA-v6.16.8-win-x64-patched")

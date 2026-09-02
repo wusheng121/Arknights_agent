@@ -1,164 +1,121 @@
 # AI 明日方舟主播 - 待办与规划
 
-## 当前状态
+## 当前状态 (2026-09-02)
 
-- **L1 已验证**: 1-7 通关成功 (DeepSeek 生成作业 + MAA Copilot 一体化执行)
-- **L2 已验证**: 知识库建设完成,1-7 无漏通关
-  - 出怪波次解析 (wave_parser.py)
-  - 干员技能提取 (skill_extractor.py)
-  - 敌人属性查询 (enemy_lookup.py)
-  - prompt 升级 (波次时序 + Retreat 机制 + temperature=0)
-  - 作业缓存 (job_cache/main_01-07.json)
-- **L3 胜负检测**: 已实现 (_detect_battle_result, Stars 模板匹配)
-- **架构**: MAA Copilot 开环模式 (DeepSeek 生成作业 → 后处理 → MAA 盲执行 → 胜负检测)
-- **SingleStep patch**: 3 行代码改完即可 (update_deployment(false)),需重编译 MaaCore.dll
+### ✅ 已完成
 
----
+- **L1 通关验证**: 1-7 Stars=3 (煌单核), AT-7 Stars=3 (专家作业)
+- **L2 知识库**: ArknightsGameData + 波次解析 + 敌人属性 + 干员特性 + RAG
+- **sim 模拟器**: 67% 通过率 (13个bug修复, 含fragment串行/AUTO技能/atk_scale)
+- **条件化作业**: kills/costs 条件化, 不用固定时间
+- **自反思记忆 (P3)**: 真机结果→memory.py→自动promote原则
+- **AI 主播框架**: EventBus + Commentator(LLM解说) + TTS(edge-tts+MCI) + 弹幕(mock)
+- **BattleMonitor 安全网**: 实时截图+感知+应急干预
+- **UI 导航器**: 界面检测(ToggleSettingsMenu 0.967) + 游戏启动 + back key退出子界面
+- **MAA 触控**: minitouch 模式 (与 MAA GUI 一致)
+- **MAA 编队+开始战斗**: BattleStartPre → Formation → BattleStartAll 正常工作
 
-## L2: 知识库建设 (预计 3.5 天)
+### ❌ 卡住的问题
 
-### Phase 1: 数据下载 (0.5 天)
+**MAA Python API 无法从主界面导航到关卡。**
 
-- [ ] 下载 ArknightsGameData (GitHub: Kengxxiao/ArknightsGameData)
-  - 稀疏检出 `zh_CN/gamedata/` 子目录
-  - 存放到 `data/gamedata/`
-  - 核心文件:
-    - `levels/obt/main/level_main_01-07.json` (出怪波次)
-    - `levels/enemydata/enemy_database.json` (14.7MB, 敌人属性)
-    - `excel/character_table.json` (干员技能数据)
-    - `excel/skill_table.json` (技能描述)
-    - `excel/enemy_handbook_table.json` (敌人中文名)
+- `Copilot` filename 模式: 禁用导航
+- `Copilot` copilot_list 模式: v6.16.8 崩溃 (C++ 异常, JSON 格式不确定)
+- `Custom` + `task_names=["1-7"]`: MAA 找不到 StageTheme 按钮
+- MAA GUI 能正常导航, Python API 不能 (原因未确定)
+- `StartUp` 直接任务类型: 已尝试, 仍然找不到 StageTheme
 
-### Phase 2: 解析器开发 (1.5 天)
+### 后续突破方向
 
-- [ ] `src/data/wave_parser.py` — 出怪波次解析器
-  - 递归展开 waves → fragments → actions
-  - 累积 preDelay 得绝对出怪时间
-  - routeIndex → routes[idx] → 路线描述 (上/中/下路, 起点→终点)
-  - enemy key → enemy_handbook → 中文名
-  - 输出紧凑文本: `"T+2s: 源石虫×1 上路 | T+5s: 源石虫×3 中路 间隔1s"`
-
-- [ ] `src/data/skill_extractor.py` — 干员技能提取器
-  - MAA char_id → character_table.json 匹配
-  - 提取技能名/描述/效果/持续时间/CD
-  - 输出: `"桃金娘: 技能1'支援号·β' 回复6费 CD25s"`
-
-- [ ] `src/data/enemy_lookup.py` — 敌人属性查询
-  - enemy_id → enemy_database.json → HP/ATK/DEF/RES/moveSpeed
-  - 输出: `"源石虫: HP1030 ATK42 | 士兵: HP1000 ATK130 DEF50"`
-
-### Phase 3: 集成 (0.5 天)
-
-- [ ] 更新 `src/data/map_info.py`
-  - MapInfo 加 `waves` 字段
-  - `to_description()` 包含波次时间线 + 敌人属性摘要
-
-- [ ] 更新 `src/brain/llm_client.py`
-  - SYSTEM_PROMPT_COPILOT 加入:
-    - 出怪波次时序 (让 DeepSeek 按出怪顺序部署)
-    - 干员技能描述 (改善干员选择和技能使用)
-    - 敌人属性 (改善干员搭配)
-    - Retreat + 二次部署机制
-    - `kills` 字段用法 (在击杀到 X 时部署)
-  - 加 `temperature=0` 保证作业一致性
-
-- [ ] 更新 `src/real_run.py`
-  - 调用 wave_parser 解析 level JSON
-  - 调用 skill_extractor 提取选中干员技能
-  - 调用 enemy_lookup 查询敌人属性
-  - 喂完整上下文给 DeepSeek
-
-### Phase 4: 验证 (0.5 天)
-
-- [ ] 1-7 跑 3 次 `--llm`
-  - 检查: 部署顺序匹配出怪顺序
-  - 检查: 三路覆盖 (上路/中路/下路都有干员)
-  - 检查: 无漏怪
-- [ ] 通关作业存到 `job_cache/main_01-07.json`
-
-### Phase 5: 胜负检测 (L3 预览, 0.5 天)
-
-- [ ] MAA `AllTasksCompleted` 后截图
-  - 用 `StageDrops-Stars-2/3` 模板检测胜负
-  - 胜: 缓存作业
-  - 负: 标记失败, 可重试
+1. **升级 MAA 到最新版**: copilot_list 可能已修复
+2. **用 MaaFramework** (新框架): `pip install maafw`, Python 支持更好
+3. **用 MAA CLI**: 命令行接口可能行为更接近 GUI
+4. **逆向 MAA GUI**: Process Monitor 拦截 GUI 发给 DLL 的确切 JSON
+5. **用 MAA GUI 自动化**: UI 自动化工具控制 MAA GUI
 
 ---
 
-## L3: 多关卡 + 失败重试 (预计 +2-3 天)
+## 模块清单
 
-- [ ] 作业缓存机制
-  - 通关后保存到 `job_cache/<stage_id>.json`
-  - 下次直接用缓存, 不调 LLM
-- [ ] 胜负检测集成
-  - MAA 完成后截图检测 Stars
-  - 失败自动重试 (改 prompt 或换干员)
-- [ ] 多关卡支持
-  - 4177 个 tile 文件覆盖所有关卡
-  - 每关下载对应 level JSON
-  - 关卡选择 UI 自动化 (MAA tasks/Stages 模板)
-
----
-
-## L4: 完整 AI 主播 (预计 +1-2 周)
-
-### 语音
-- [ ] 云端 TTS API (阿里云/腾讯云/Azure)
-- [ ] 文本 → 语音流, 控制语速/情感
-
-### 虚拟形象
-- [ ] VTube Studio WebSocket API
-- [ ] LLM 输出 → 表情/动作触发
-
-### 推流
-- [ ] OBS WebSocket API
-- [ ] 场景切换 (游戏画面/虚拟形象/弹幕)
-
-### 弹幕互动
-- [ ] B站直播弹幕 API (WebSocket)
-- [ ] 弹幕 → 调度器 → LLM 回复
-- [ ] @主播 优先处理
-
-### 主播人格
-- [ ] 人格 prompt (性格/说话风格/口头禅)
-- [ ] 聊天记忆 (RAG)
-- [ ] 思考旁白 (决策时播报)
+| 模块 | 文件 | 状态 |
+|------|------|------|
+| LLM 管道 | `src/brain/pipeline.py` | ✅ |
+| LLM 客户端 | `src/brain/llm_client.py` | ✅ |
+| RAG 检索 | `src/data/rag_retriever.py` | ✅ |
+| 专家作业爬取 | `src/data/expert_crawler.py` | ✅ |
+| 离线蒸馏 | `src/data/pass1_annotate.py` + `pass2_aggregate.py` | ✅ |
+| 统计模式 | `src/data/pattern_extractor.py` | ✅ |
+| 干员特性 | `src/data/oper_profile.py` | ✅ |
+| 地图信息 | `src/data/map_info.py` | ✅ |
+| 波次解析 | `src/data/wave_parser.py` | ✅ |
+| 敌人属性 | `src/data/enemy_lookup.py` | ✅ |
+| 关卡工具 | `src/data/stage_util.py` | ✅ |
+| 后处理 | `src/data/job_post_process.py` | ✅ |
+| MAA 封装 | `src/game/maapy_client.py` | ✅ |
+| TileCalc | `src/game/tile_calc.py` | ✅ |
+| CV 感知 | `src/game/cv_perception.py` | ✅ |
+| 技能检测 | `src/game/skill_detector.py` | ✅ |
+| 安全网 | `src/game/battle_monitor.py` | ✅ |
+| UI 导航 | `src/game/ui_navigator.py` | ⚠️ |
+| sim 核心 | `src/sim/game_state.py` | ✅ |
+| sim 数据 | `src/sim/data_loader.py` | ✅ |
+| sim 范围 | `src/sim/range_calc.py` | ✅ |
+| sim 记忆 | `src/sim/memory.py` | ✅ |
+| sim 验证 | `src/sim/validate.py` | ✅ |
+| sim 校准 | `src/sim/calibrator.py` | ✅ |
+| 事件总线 | `src/streamer/event_bus.py` | ✅ |
+| 解说生成 | `src/streamer/commentator.py` | ✅ |
+| TTS 引擎 | `src/streamer/tts_engine.py` | ✅ |
+| VTube | `src/streamer/vtube_controller.py` | stub |
+| OBS | `src/streamer/obs_controller.py` | stub |
+| 弹幕 | `src/streamer/danmaku_reader.py` | mock |
+| 主控 | `src/streamer/streamer.py` | ✅ |
+| 主入口 | `src/real_run.py` | ✅ |
 
 ---
 
-## 架构决策记录
+## 环境配置
 
-### MAA Copilot 开环模式 (当前)
-- DeepSeek 生成整关作业 → MAA 盲执行
-- 优点: 可靠 (MAA deploy_oper 闭环)
-- 缺点: 无法战斗中适应变化
-
-### SingleStep 实时模式 (已放弃)
-- MAA SingleStep `_run` 缺 `update_deployment`
-- 每次 deploy 后不重新识别待部署区 → 干员列表过期
-- TODO: 调查能否修改 MAA 源码补上 update_deployment
-
-### ADB 实时控制 (已放弃)
-- CV 感知不可靠 (flag 重复/识别不准)
-- tile_calc 坐标正确但拖拽精度不够
-- MAA deploy_oper 比我们 ADB 方式可靠得多
+```
+Python 3.14
+DeepSeek API (DEEPSEEK_API_KEY in .env)
+edge-tts (pip install edge-tts)
+MAA v6.16.8 (C:\Users\slient\Downloads\MAA-v6.16.8-win-x64)
+MAA 源码 (C:\demo\MaaAssistantArknights-dev-v2)
+MuMu 模拟器 (127.0.0.1:16384, 1920×1080, Android 15)
+ADB (C:\Program Files\Netease\MuMu\nx_main\adb.exe)
+MAA 触控模式: minitouch
+```
 
 ---
 
-## 数据源参考
+## 数据源
 
 | 数据源 | 用途 | 位置 |
 |--------|------|------|
 | MAA 安装 | 执行/感知/模板 | `C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\` |
 | MAA 源码 | 参考 | `C:\demo\MaaAssistantArknights-dev-v2\` |
-| ArknightsGameData | 游戏数据 | `data/gamedata/` (待下载) |
+| ArknightsGameData | 游戏数据 | `data/gamedata/` |
 | prts.wiki | 补充数据 | `https://prts.wiki/api.php` |
 | MuMu 模拟器 | 游戏运行 | `127.0.0.1:16384` |
 | DeepSeek API | LLM 大脑 | `.env` DEEPSEEK_API_KEY |
 | 通义千问-VL | VLM 感知 | `.env` VLM_API_KEY |
+| GitHub | 代码仓库 | https://github.com/wusheng121/Arknights_agent |
 
-1. 模拟器 V3: 加更多技能效果（范围扩大/阻挡增加）→ 让 sim 能真正分胜负
-2. LLM + sim 闭环: 生成→验证→修正→真机
-3. Tier 2 自反思记忆: 结构化失败记录
-4. 实时感知: MAA Python API 绑定 (click + screencap)
-5. AI 主播: TTS + VTube + OBS + 弹幕
+---
+
+## 测试命令
+
+```bash
+# 跑 sim 测试
+python -m pytest tests/ -q
+
+# 跑 1-7 sim (单关)
+python -c "from src.sim.game_state import run_job; import json; ..."
+
+# 跑全流程 (需要游戏运行)
+python -m src.real_run --llm --stage 1-7 --fresh
+
+# 跑 AI 主播模拟 (不需要游戏)
+python -m src.streamer.streamer
+```

@@ -576,3 +576,150 @@ MAA Copilot 条件系统：
    - Phase 2: 安全网感知 + 事件总线 → 实时状态感知
    - Phase 3: 解说生成 + TTS → 有声音的 AI 主播
    - Phase 4: VTube + OBS + 弹幕 → 完整直播体验
+
+## 14. 项目当前状态（2026-09-02）
+
+### 14.1 已完成的模块
+
+| 模块 | 文件 | 状态 | 说明 |
+|------|------|------|------|
+| LLM 管道 | `src/brain/pipeline.py` | ✅ | 4步生成 Copilot 作业 (选干员→选位置→选技能→定部署顺序) |
+| RAG | `src/data/rag_retriever.py` | ✅ | 1365份专家作业 + prts.wiki 攻略 + prts.plus API |
+| 专家作业爬取 | `src/data/expert_crawler.py` | ✅ | 1365份/319关卡 |
+| 离线蒸馏 | `src/data/pass1_annotate.py` + `pass2_aggregate.py` | ✅ | 457标注→87条原则 |
+| 统计模式 | `src/data/pattern_extractor.py` | ✅ | strategy_knowledge.txt |
+| 条件化作业 | `pipeline.py` PROMPT_STEP4_ORDER | ✅ | kills/costs 条件化,不用固定时间 |
+| sim 模拟器 | `src/sim/game_state.py` + `data_loader.py` | ✅ | 67%通过率,13个bug修复 |
+| sim 记忆 | `src/sim/memory.py` | ✅ | 结构化失败/成功记录,自动 promote 原则 |
+| sim 校准 | `src/sim/calibrator.py` | ✅ | sim vs 真机对比框架 |
+| sim 验证循环 | `src/sim/validate.py` | ✅ | LLM生成→sim验证→LLM修正 |
+| MAA Copilot 执行 | `src/game/maapy_client.py` | ✅ | 编队+战斗+actions |
+| BattleMonitor 安全网 | `src/game/battle_monitor.py` | ✅ | 实时截图+感知+应急干预 |
+| AI 主播框架 | `src/streamer/` (7个模块) | ✅ | EventBus+Commentator+TTS+Danmaku+VTube+OBS |
+| UI 导航器 | `src/game/ui_navigator.py` | ⚠️ | 界面检测可用,导航不完整 |
+| 游戏启动 | `ui_navigator.launch_game()` | ✅ | monkey 命令启动+等待加载 |
+| P3 真机记忆 | `real_run.py` | ✅ | 胜负→memory.py 记录 |
+| TileCalc | `src/game/tile_calc.py` | ✅ | 格子→屏幕坐标 |
+| CVPerception | `src/game/cv_perception.py` | ✅ | 部署面板+费用+职业识别 |
+| 技能检测 | `src/game/skill_detector.py` | ✅ | 3状态:not_ready/ready/active |
+
+### 14.2 sim 修复记录（13个bug）
+
+| # | 修复 | 效果 |
+|---|------|------|
+| 1 | 群攻卫 AOE (max_targets=block) | kills 1→11 |
+| 2 | SpeedUp (双 step) | 游戏速度正确 |
+| 3 | skill_usage 自动技能 | SP满自动开 |
+| 4 | 敌人位置 round() | 范围检测更准 |
+| 5 | maxLifePoint 从 level JSON | 10 vs 3 |
+| 6 | moveMultiplier 从 level JSON | 0.5 vs 1.0 |
+| 7 | spawn interval 展开 | leaks 16→10 |
+| 8 | AUTO 自动触发 + atk_scale | kills 11→25, 煌伤害765→2218 |
+| 9 | 每 step 只刷一个敌人 | 同时间敌人逐个生成 |
+| 10 | fragment 串行 (blockFragment) | 前8个全是源石虫 |
+| 11 | PREVIEW_CURSOR 过滤 | 移除虚假spawn |
+| 12 | MAA skill 编号 (0→1 indexed) | 正确加载技能 |
+| 13 | MANUAL toggle + blackboard | block_cnt/attack@atk_scale |
+
+### 14.3 sim 通过率
+
+```
+修复前: 0% (1 kill, 3 leaks)
+修复后: 67% (4/6 通关)
+  煌:        WIN  41 kills  0 leaks  18 auto-casts
+  山:        WIN  41 kills  0 leaks  22 auto-casts
+  逻各斯:    WIN  33 kills  8 leaks
+  娜仁图亚:  WIN  41 kills  0 leaks
+  怒潮凛冬:  LOSE 25 kills 10 leaks (二技能SP=50太慢)
+  斩业星熊:  LOSE  5 kills 10 leaks (attack@atk_scale=0.9降低攻击)
+```
+
+### 14.4 卡住的问题
+
+**MAA Python API 无法从主界面导航到关卡。**
+
+- `Copilot` 的 `filename` 模式: 禁用导航 (`MultiCopilotTaskPlugin` disabled)
+- `Copilot` 的 `copilot_list` 模式: 启用导航,但在 v6.16.8 崩溃 (C++ 异常)
+- `Custom` + `task_names=["1-7"]`: MAA 找不到 StageTheme 按钮 (OCR/模板匹配失败)
+- MAA GUI 能正常导航,但 Python API 不能 (原因未确定)
+- minitouch 已确认生效 (MinitouchController::connect 成功)
+- 主界面检测已修复 (ToggleSettingsMenu 0.967, 不再用 Home.png 0.500)
+
+### 14.5 后续突破方向
+
+1. **升级 MAA 到最新版**: copilot_list 可能已修复崩溃
+2. **用 MaaFramework** (新框架): pip install maafw, Python 支持更好
+3. **用 MAA CLI**: 命令行接口可能行为更接近 GUI
+4. **逆向 MAA GUI**: 用 Process Monitor 拦截 GUI 发给 DLL 的确切 JSON
+5. **用 MAA GUI 自动化**: 用 UI 自动化工具控制 MAA GUI 本身
+
+### 14.6 AI 主播验证记录
+
+完整直播流程已验证 (1-7 Stars=3):
+```
+主播上线 → 解说开场白 → 战斗开始解说 → 弹幕互动回复 → 通关解说 → 告别语 → 关闭
+```
+
+TTS 使用 Windows MCI API 同步播放 edge-tts 合成的语音,不依赖外部播放器。
+
+### 14.7 文件结构
+
+```
+src/
+├── brain/           # LLM 管道
+│   ├── pipeline.py       # 4步生成作业
+│   └── llm_client.py     # DeepSeek 客户端
+├── data/            # 知识库
+│   ├── oper_profile.py    # 干员特性
+│   ├── map_info.py        # 地图信息
+│   ├── wave_parser.py     # 波次解析
+│   ├── enemy_lookup.py    # 敌人属性
+│   ├── stage_util.py      # 关卡工具
+│   ├── expert_crawler.py  # 专家作业爬取
+│   ├── rag_retriever.py   # RAG 检索
+│   ├── rag_jobs.py        # 作业索引
+│   ├── rag_wiki.py        # wiki 攻略
+│   ├── pass1_annotate.py  # 离线标注
+│   ├── pass2_aggregate.py # 原则归纳
+│   ├── pattern_extractor.py # 统计模式
+│   └── job_post_process.py # 后处理
+├── game/            # 游戏控制
+│   ├── maapy_client.py    # MAA Python 封装
+│   ├── tile_calc.py       # 格子→屏幕坐标
+│   ├── cv_perception.py   # CV 感知
+│   ├── skill_detector.py  # 技能状态检测
+│   ├── battle_monitor.py  # 安全网监控
+│   └── ui_navigator.py    # UI 导航
+├── sim/             # 模拟器
+│   ├── game_state.py      # 核心模拟
+│   ├── data_loader.py     # 数据加载
+│   ├── range_calc.py      # 攻击范围
+│   ├── memory.py          # 自反思记忆
+│   ├── validate.py        # LLM 修正循环
+│   └── calibrator.py      # sim-to-real 校准
+├── streamer/         # AI 主播
+│   ├── event_bus.py       # 事件总线
+│   ├── commentator.py     # LLM 解说
+│   ├── tts_engine.py      # edge-tts + MCI
+│   ├── vtube_controller.py # VTube stub
+│   ├── obs_controller.py  # OBS stub
+│   ├── danmaku_reader.py  # 弹幕 stub
+│   └── streamer.py        # 主控
+└── real_run.py      # 主入口
+```
+
+### 14.8 环境配置
+
+```
+Python 3.14
+DeepSeek API (DEEPSEEK_API_KEY)
+edge-tts (pip install edge-tts)
+MAA v6.16.8 (C:\Users\slient\Downloads\MAA-v6.16.8-win-x64)
+MuMu 模拟器 (127.0.0.1:16384, 1920×1080, Android 15)
+ADB (C:\Program Files\Netease\MuMu\nx_main\adb.exe)
+MAA 触控模式: minitouch
+```
+
+### 14.9 GitHub
+
+https://github.com/wusheng121/Arknights_agent

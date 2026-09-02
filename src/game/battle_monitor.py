@@ -40,7 +40,7 @@ from src.game.skill_detector import detect_skill_state
 
 log = logging.getLogger(__name__)
 
-ADB_PATH = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_device\15.0\shell\adb.exe")
+ADB_PATH = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb.exe")
 MAA_ADDRESS = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 MAA_RES = os.getenv("MAA_RESOURCE_PATH", r"C:\Users\slient\Downloads\MAA-v6.16.8-win-x64\resource")
 
