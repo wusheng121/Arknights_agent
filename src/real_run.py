@@ -552,21 +552,16 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
             log.error("游戏启动失败")
             return
 
-    # StartUp 直接任务类型 (不是 Custom 包装) + Custom 导航 + Copilot 战斗
-    log.info("=== MAA: StartUp + Custom(1-7) + Copilot ===")
-    # Step 1: StartUp 直接任务类型 (关闭弹窗+确保主界面)
+    # 两阶段: Fight 导航到关卡 → stop → Copilot 接管战斗
+    # Fight 自带导航(主界面→选章节→OCR找关卡→进入作战)
+    # 但 Fight 用代理指挥,不是 Copilot 作业
+    # 所以: Fight 导航到关卡详情页后 stop,再 Copilot 接管
+    log.info("=== MAA 两阶段: Fight(导航) → Copilot(战斗) ===")
+
+    # 阶段1: StartUp + Fight 导航到关卡
     await client.append("StartUp", {})
-    # Step 2: Custom 导航到 1-7
-    _stage_nav = "1-7"
-    if stage != "1-7":
-        _stage_nav = stage
-    await client.append("Custom", {"task_names": [_stage_nav]})
-    # Step 3: Copilot 编队 + 战斗 + actions
-    await client.append("Copilot", {
-        "filename": job_path,
-        "formation": True,
-        "formation_index": 0,
-    })
+    _stage_code = stage  # "1-7" 等
+    await client.append("Fight", {"stage": _stage_code, "times": 1})
 
     _ENABLE_STREAMER = False
     _streamer = None
@@ -574,93 +569,88 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
 
     await client.start()
 
-    # 等待 MAA 完成
+    # 监控回调: 等待 Fight 导航完成(检测到 BattleStartPre 或 ChainCompleted)
     import time as _time
     _start_time = _time.time()
+    _fight_done = False
+    _battle_started = False
+
+    while True:
+        await asyncio.sleep(0.5)
+        if not client.running():
+            _fight_done = True
+            break
+        if _time.time() - _start_time > 120:
+            log.warning("Fight 阶段超时(120s), 强制停止")
+            client.stop()
+            _fight_done = True
+            break
+
+    log.info("Fight 阶段完成 (%.1fs)", _time.time() - _start_time)
+
+    # 检查当前界面: Fight 应该已经导航到关卡详情页或更远
+    _nav_info2 = _navigator.get_screen_info()
+    _screen2 = _nav_info2["screen"]
+    log.info("Fight 后界面: %s", _screen2)
+
+    # 阶段2: Copilot 接管 (编队 + 开始战斗 + actions)
+    # Copilot filename 模式: BattleStartPre → Formation → BattleStartAll → Actions
+    log.info("=== 阶段2: Copilot 接管 ===")
+    await client.append("Copilot", {
+        "filename": job_path,
+        "formation": True,
+        "formation_index": 0,
+    })
+
+    await client.start()
+
+    # 等待 Copilot 完成
+    _copilot_start = _time.time()
     while True:
         await asyncio.sleep(0.5)
         if not client.running():
             break
-        if _time.time() - _start_time > 120:
-            log.warning("MAA 超时(120s), 强制停止")
+        if _time.time() - _copilot_start > 120:
+            log.warning("Copilot 阶段超时(120s), 强制停止")
             client.stop()
             break
 
-    log.info("MAA 任务完成 (%.1fs)", _time.time() - _start_time)
+    log.info("Copilot 阶段完成 (%.1fs)", _time.time() - _copilot_start)
 
-    # === 验证1: MAA 完成后,检查是否真的在战斗中 ===
-    # HP flag + opers flag + kills flag 三重验证
-    _in_battle = False
-    try:
-        _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-        _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-        _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-        if _img is not None:
-            _scores = {}
-            for _name, _rel in [("hp", "Battle/BattleFlag/BattleHpFlag.png"),
-                                 ("opers", "Battle/BattleFlag/BattleOpersFlag.png"),
-                                 ("kills", "Battle/BattleFlag/BattleKillsFlag.png")]:
-                _path = os.path.join(MAA, "resource", "template", _rel)
-                _t = _cv2.imread(_path)
-                if _t is not None:
-                    _ts = _cv2.resize(_t, (int(_t.shape[1]*1.5), int(_t.shape[0]*1.5)))
-                    _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-                    _, _mv, _, _ = _cv2.minMaxLoc(_res)
-                    _scores[_name] = _mv
-            log.info("战斗状态: hp=%.2f opers=%.2f kills=%.2f",
-                     _scores.get("hp", 0), _scores.get("opers", 0), _scores.get("kills", 0))
-            if _scores.get("hp", 0) > 0.6 and _scores.get("opers", 0) > 0.7:
-                _in_battle = True
-                log.info("=== 确认在战斗中 ===")
-            else:
-                log.warning("=== 不在战斗中! MAA 导航/编队/开始战斗 可能失败 ===")
-                log.warning("  界面: %s", _navigator.detect_screen(_img))
-    except Exception as e:
-        log.error("战斗状态验证失败: %s", e)
-
-    # === 部署验证 (如果在战斗中) ===
-    if _in_battle:
-        await asyncio.sleep(3)
-        _deploy_ok = await _verify_and_fallback_deploy(
-            ADB, ADDR, MAA, job_data, _tile_calc, _cv2, _np, _sp)
-        log.info("部署验证: %s", "通过" if _deploy_ok else "失败(已尝试ADB fallback)")
-
-    # === 等待战斗结束 (仅在确认在战斗中时) ===
-    if _in_battle:
-        _wait_start = _time.time()
-        _last_hp = 0
-        _no_change = 0
-        while _time.time() - _wait_start < 300:
-            try:
-                _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-                _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-                _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-                if _img is None:
-                    break
-                _hp_t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
-                _ts = _cv2.resize(_hp_t, (int(_hp_t.shape[1]*1.5), int(_hp_t.shape[0]*1.5)))
-                _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-                _, _hp_mv, _, _ = _cv2.minMaxLoc(_res)
-                if _hp_mv > 0.6:
-                    _elapsed = _time.time() - _wait_start
-                    if int(_elapsed) % 30 == 0:
-                        log.info("战斗中... (%.0fs)", _elapsed)
-                    if abs(_hp_mv - _last_hp) < 0.01:
-                        _no_change += 1
-                        if _no_change > 60:
-                            log.warning("战斗卡住(5分钟无变化),退出")
-                            break
-                    else:
-                        _no_change = 0
-                    _last_hp = _hp_mv
-                else:
-                    log.info("HP flag 消失 (%.2f), 战斗结束", _hp_mv)
-                    break
-            except Exception:
+    # === 战斗等待循环 (Copilot filename 模式不等战斗结束) ===
+    # 检查是否在战斗中,等战斗结束
+    _wait_start = _time.time()
+    _last_hp = 0
+    _no_change = 0
+    while _time.time() - _wait_start < 300:
+        try:
+            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
+            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
+            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+            if _img is None:
                 break
-            await asyncio.sleep(5)
-    else:
-        log.warning("跳过战斗等待 (未确认在战斗中)")
+            _hp_t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
+            _ts = _cv2.resize(_hp_t, (int(_hp_t.shape[1]*1.5), int(_hp_t.shape[0]*1.5)))
+            _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
+            _, _hp_mv, _, _ = _cv2.minMaxLoc(_res)
+            if _hp_mv > 0.6:
+                _elapsed = _time.time() - _wait_start
+                if int(_elapsed) % 30 == 0:
+                    log.info("战斗中... (%.0fs)", _elapsed)
+                if abs(_hp_mv - _last_hp) < 0.01:
+                    _no_change += 1
+                    if _no_change > 60:
+                        log.warning("战斗卡住(5分钟无变化),退出")
+                        break
+                else:
+                    _no_change = 0
+                _last_hp = _hp_mv
+            else:
+                log.info("HP flag 消失 (%.2f), 战斗结束", _hp_mv)
+                break
+        except Exception:
+            break
+        await asyncio.sleep(5)
 
 
     # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
@@ -699,7 +689,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         await asyncio.sleep(3)
         await _streamer.stop()
 
-    # MAA copilot_list 模式会自己处理导航+开始战斗+等待结束
+    # Fight + Copilot 两阶段方案
     # 不再需要 ADB tap fallback
 
     # 胜负检测: 截图匹配 Stars 模板
