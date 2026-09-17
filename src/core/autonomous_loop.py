@@ -35,7 +35,7 @@ ADB_PATH = os.getenv("MAA_ADB_PATH", r"C:\Program Files\Netease\MuMu\nx_main\adb
 ADB_ADDR = os.getenv("MAA_ADDRESS", "127.0.0.1:16384")
 TILE_PATH = os.path.join(MAA_RES, "Arknights-Tile-Pos",
                          "main_01-07-obt-main-level_main_01-07.json")
-JOB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "copilot_job.json")
+JOB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "copilot_job_runtime.json")
 
 # 开始作战按钮模板
 _START_TEMPL = None

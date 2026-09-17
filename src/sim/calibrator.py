@@ -399,7 +399,7 @@ if __name__ == "__main__":
         with open(job_path, encoding="utf-8") as f:
             job_data = json.load(f)
     else:
-        job_path = os.path.join(os.path.dirname(__file__), "..", "..", "copilot_job.json")
+        job_path = os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "copilot_job_runtime.json")
         with open(job_path, encoding="utf-8") as f:
             job_data = json.load(f)
 

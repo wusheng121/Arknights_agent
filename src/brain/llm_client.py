@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 from src.game.copilot_schema import Action, CopilotDoc, GroupSpec, OperSpec
 from src.game.perception import GameState
 from src.resilience.guarded_call import GuardedCall
+
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """你是明日方舟 AI 主播的战斗决策模块。给定当前战局状态,输出「下一个动作」的 JSON,须严格符合 MAA copilot-schema 的单个 action:
 {"type":"Deploy"|"Skill"|"Retreat"|"SpeedUp"|"BulletTime"|"SkillUsage","name":<干员名>,"location":[x,y],"direction":"Left"|"Right"|"Up"|"Down"|"None","kills":<int>,"costs":<int>}
@@ -96,7 +99,7 @@ def make_brain(
         )
         content = resp.choices[0].message.content or "{}"
         act = _coerce(json.loads(content))
-        print("[brain primary]", act.type, act.name, act.location, act.direction)
+        log.info("[brain primary] %s %s %s %s", act.type, act.name, act.location, act.direction)
         return act
 
     async def fallback(state: GameState, operators: list[dict] | None = None) -> Action:
@@ -105,9 +108,9 @@ def make_brain(
             for o in ranked:
                 if o.get("name"):
                     act = Action(type="Deploy", name=o["name"], location=(4, 5), direction="Right", doc="先锋回费")
-                    print("[brain fallback]", act.type, act.name, act.location)
+                    log.info("[brain fallback] %s %s %s", act.type, act.name, act.location)
                     return act
-        print("[brain fallback] SpeedUp")
+        log.info("[brain fallback] SpeedUp")
         return Action(type="SpeedUp")
 
     return GuardedCall("llm", primary, fallback, timeout=12.0, retries=1, fail_threshold=3, cool=60.0)
@@ -239,7 +242,7 @@ def make_copilot_brain(
         import pathlib
         pathlib.Path(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "deepseek_content.txt")).write_text(
             f"=== content ===\n{content}\n=== reasoning_content ===\n{rc}\n", encoding="utf-8")
-        print("[DeepSeek] content len=%d reasoning len=%d" % (len(content), len(rc)))
+        log.info("[DeepSeek] content len=%d reasoning len=%d", len(content), len(rc))
         if not content.strip():
             raise RuntimeError("DeepSeek content 为空(可能答案在 reasoning_content)")
         return _coerce_doc(json.loads(content))

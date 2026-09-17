@@ -32,6 +32,8 @@ diagnose_*.py
 deepseek_content.txt
 copilot_step.json
 copilot_formation.json
+copilot_job*.json
+digit_lib/
 
 # Game data (large, download separately)
 /data/

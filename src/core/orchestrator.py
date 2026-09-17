@@ -66,9 +66,9 @@ async def game_loop(client: MockMaapyClient | None = None, steps: int = 5) -> No
     client._resource_path = os.getenv("MAA_RESOURCE_PATH", "")
 
     # 读 copilot_job.json 作为编队 + 动作来源
-    job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "copilot_job.json"))
+    job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "copilot_job_runtime.json"))
     if not os.path.exists(job_path):
-        log.error("无 copilot_job.json,先跑 --llm 生成作业")
+        log.error("无 copilot_job_runtime.json,先跑 --llm 生成作业")
         return
     with open(job_path, encoding="utf-8") as f:
         job = _json.load(f)

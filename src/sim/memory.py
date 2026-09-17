@@ -322,7 +322,7 @@ if __name__ == "__main__":
     import json
     from src.sim.game_state import run_job
     
-    with open("copilot_job_llm_enhanced.json", encoding="utf-8") as f:
+    with open(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "copilot_job_llm_enhanced.json"), encoding="utf-8") as f:
         job = json.load(f)
     
     result = run_job("act44side_07", job)

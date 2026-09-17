@@ -490,7 +490,7 @@ if __name__ == "__main__":
     db.load_from_maa()
     db.load_cost_from_file("cost.json")
 
-    with open("copilot_job.json", encoding="utf-8") as f:
+    with open(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "copilot_job_runtime.json"), encoding="utf-8") as f:
         job = json.load(f)
 
     print("修正前 actions:", len(job["actions"]))

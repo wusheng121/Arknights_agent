@@ -296,7 +296,7 @@ class CVPerception:
         if not rects:
             return -1
 
-        digit_lib = os.path.join(os.path.dirname(__file__), "..", "..", "digit_lib")
+        digit_lib = os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "digit_lib")
         os.makedirs(digit_lib, exist_ok=True)
         templates = {}
         for f in os.listdir(digit_lib):

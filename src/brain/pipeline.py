@@ -9,10 +9,13 @@ Step 4: 定部署顺序 (位置+费用+波次 → actions)
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 from src.game.copilot_schema import Action, CopilotDoc, OperSpec
+
+log = logging.getLogger(__name__)
 
 
 PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图、波次、敌人、专家参考、策略知识、因果原则和可用干员,选编队。
@@ -205,10 +208,10 @@ async def generate_job_pipeline(
         "available_operators": ops_with_roles if ops_with_roles else ops_brief,
     }, ensure_ascii=False)
 
-    print("[Step1] 选干员...")
+    log.info("[Step1] 选干员...")
     step1_result = await _call_deepseek(client, mdl, PROMPT_STEP1_SELECT, step1_user)
     selected_names = [o["name"] for o in step1_result.get("selected", [])]
-    print("[Step1] 选中: %s" % ", ".join(selected_names))
+    log.info("[Step1] 选中: %s", ", ".join(selected_names))
 
     # ===== Step 2: 选位置 =====
     # 精简干员信息: 只保留角色/阻挡/费用/范围,去掉天赋/技能描述(减少噪音)
@@ -237,10 +240,10 @@ async def generate_job_pipeline(
         "principles": principles,
     }, ensure_ascii=False)
 
-    print("[Step2] 选位置...")
+    log.info("[Step2] 选位置...")
     step2_result = await _call_deepseek(client, mdl, PROMPT_STEP2_POSITION, step2_user)
     positions = step2_result.get("positions", [])
-    print("[Step2] 位置: %s" % json.dumps(positions, ensure_ascii=False)[:200])
+    log.info("[Step2] 位置: %s", json.dumps(positions, ensure_ascii=False)[:200])
 
     # ===== Step 3: 选技能 =====
     # 给选中干员的技能描述
@@ -259,10 +262,10 @@ async def generate_job_pipeline(
         "principles": principles,
     }, ensure_ascii=False)
 
-    print("[Step3] 选技能...")
+    log.info("[Step3] 选技能...")
     step3_result = await _call_deepseek(client, mdl, PROMPT_STEP3_SKILL, step3_user)
     skills = step3_result.get("skills", [])
-    print("[Step3] 技能: %s" % json.dumps(skills, ensure_ascii=False)[:200])
+    log.info("[Step3] 技能: %s", json.dumps(skills, ensure_ascii=False)[:200])
 
     # ===== Step 4: 定部署顺序 =====
     # 合并位置 + 费用 + 技能
@@ -309,10 +312,10 @@ async def generate_job_pipeline(
         "principles": principles,
     }, ensure_ascii=False)
 
-    print("[Step4] 定部署顺序...")
+    log.info("[Step4] 定部署顺序...")
     step4_result = await _call_deepseek(client, mdl, PROMPT_STEP4_ORDER, step4_user)
     actions_raw = step4_result.get("actions", [])
-    print("[Step4] actions: %d" % len(actions_raw))
+    log.info("[Step4] actions: %d", len(actions_raw))
 
     # ===== Step 5: 组装 CopilotDoc =====
     opers = []
@@ -350,5 +353,5 @@ async def generate_job_pipeline(
         actions=actions,
         minimum_required="v6.7.0",
     )
-    print("[Pipeline] 完成: %d opers, %d actions" % (len(doc.opers), len(doc.actions)))
+    log.info("[Pipeline] 完成: %d opers, %d actions", len(doc.opers), len(doc.actions))
     return doc

@@ -230,7 +230,9 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             cached = json.load(f)
         if cached.get("actions"):
             log.info("=== 使用缓存作业: %s ===", _cache_path)
-            job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+            _tmp_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp"))
+            os.makedirs(_tmp_dir, exist_ok=True)
+            job_path = os.path.join(_tmp_dir, "copilot_job_runtime.json")
             with open(job_path, "w", encoding="utf-8") as f:
                 json.dump(cached, f, ensure_ascii=False, indent=2)
             job_data = cached
@@ -405,7 +407,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
         job_data["stage_name"] = stage_name_for_maa
         # 注意: groups 不解析,让 MAA 自己从组里选能识别的干员
         # (MAA 可能无法识别较新干员,保留组让 MAA 回退到其他候选)
-        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp", "copilot_job_runtime.json"))
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
         log.info("专家作业直接使用: opers=%d actions=%d (跳过后处理)" % (
@@ -421,7 +423,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             principles=principles,
         )
         job_data = doc.to_maa()
-        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp", "copilot_job_runtime.json"))
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
         log.info("LLM 适配生成: opers=%d actions=%d (跳过后处理)" % (len(doc.opers), len(doc.actions)))
@@ -437,7 +439,7 @@ async def smoke_copilot_doc(stage: str = "1-7", fresh: bool = False) -> None:
             principles=principles,
         )
         job_data = doc.to_maa()
-        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "copilot_job.json"))
+        job_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp", "copilot_job_runtime.json"))
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job_data, f, ensure_ascii=False, indent=2)
 
