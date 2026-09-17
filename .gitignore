@@ -41,3 +41,6 @@ copilot_formation.json
 /job_cache/
 # Debug
 /debug/
+
+# Temp files
+tmp/

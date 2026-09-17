@@ -237,7 +237,7 @@ def make_copilot_brain(
         content = msg.content or ""
         rc = getattr(msg, "reasoning_content", "") or ""
         import pathlib
-        pathlib.Path("deepseek_content.txt").write_text(
+        pathlib.Path(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "deepseek_content.txt")).write_text(
             f"=== content ===\n{content}\n=== reasoning_content ===\n{rc}\n", encoding="utf-8")
         print("[DeepSeek] content len=%d reasoning len=%d" % (len(content), len(rc)))
         if not content.strip():

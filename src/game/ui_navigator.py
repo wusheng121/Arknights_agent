@@ -324,7 +324,7 @@ class UINavigator:
     def wait_for_game_start(self, timeout: int = 120) -> bool:
         """等待游戏启动完成: 加载→点击屏幕→开始游戏→主界面。
 
-        处理 MAA StartUp 任务链的 ADB 等价:
+        MAA StartUp 任务链的 ADB 等价:
         1. StartToWakeUp: roi=[520,460,240,100] → 点击屏幕跳过加载
         2. StartUpConnectingFlag: roi=[0,635,450,85] → 点击"开始游戏"按钮
         3. StartUp: roi=[227,327,159,152] → 检测到主界面
@@ -333,76 +333,6 @@ class UINavigator:
             timeout: 最大等待秒数
         Returns:
             True 如果到达主界面
-        """
-        import time
-        log.info("=== 等待游戏启动 ===")
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            img = self.screenshot()
-            if img is None:
-                time.sleep(2)
-                continue
-
-            screen = self.detect_screen(img)
-            log.info("  启动中... 当前界面: %s", screen)
-
-            if screen == "home":
-                log.info("=== 游戏启动完成(主界面) ===")
-                return True
-
-            if screen == "formation" or screen == "battle" or screen == "results":
-                log.info("=== 已在游戏内(%s) ===", screen)
-                return True
-
-            # 1. StartToWakeUp: 点击屏幕中部跳过加载
-            # roi=[520,460,240,100] → 中心 (640,510) in 1280x720 → (960,765) in 1920x1080
-            # 检查是否有加载图标(LoadingIcon roi=[480,210,320,280])
-            loading = self._match(img, _load_template("Battle/BattleFlag/BattleHpFlag.png"), 0.5)[0]
-            # 尝试点击屏幕中心(跳过加载/启动画面)
-            self._adb_tap(960, 540)
-            time.sleep(2)
-
-            # 再次截图检查
-            img2 = self.screenshot()
-            if img2 is not None:
-                screen2 = self.detect_screen(img2)
-                if screen2 == "home" or screen2 == "formation":
-                    log.info("=== 游戏启动完成(%s) ===", screen2)
-                    return True
-
-                # 2. StartUpConnectingFlag: 点击"开始游戏"按钮
-                # roi=[0,635,450,85] → 中心 (225,677) in 1280x720 → (337,1015) in 1920x1080
-                # 在左下角区域点击
-                self._adb_tap(337, 1015)
-                time.sleep(3)
-
-            time.sleep(2)
-
-        log.warning("游戏启动超时(%ds)", timeout)
-        return False
-
-    def launch_game(self) -> bool:
-        """启动明日方舟 app。"""
-        log.info("=== 启动明日方舟 ===")
-        try:
-            subprocess.run(
-                [ADB, "-s", ADDR, "shell", "monkey", "-p", "com.hypergryph.arknights", "1"],
-                capture_output=True, timeout=15,
-            )
-            log.info("启动命令已发送")
-            return True
-        except Exception as e:
-            log.error("启动游戏失败: %s", e)
-            return False
-
-    def wait_for_game_start(self, timeout: int = 120) -> bool:
-        """等待游戏启动完成: 加载→点击屏幕→开始游戏→主界面。
-
-        MAA StartUp 任务链的 ADB 等价:
-        1. StartToWakeUp: roi=[520,460,240,100] → 点击屏幕跳过加载
-        2. StartUpConnectingFlag: roi=[0,635,450,85] → 点击"开始游戏"按钮
-        3. StartUp: roi=[227,327,159,152] → 检测到主界面
         """
         import time
         log.info("=== 等待游戏启动 ===")
@@ -426,7 +356,7 @@ class UINavigator:
 
             # 1. 点击屏幕跳过加载画面 (StartToWakeUp)
             if not tapped_wake:
-                self._adb_tap(960, 540)  # 屏幕中心
+                self._adb_tap(960, 540)
                 time.sleep(2)
                 tapped_wake = True
                 continue
@@ -446,8 +376,21 @@ class UINavigator:
         log.warning("游戏启动超时(%ds)", timeout)
         return False
 
+    def launch_game(self) -> bool:
+        """启动明日方舟 app。"""
+        log.info("=== 启动明日方舟 ===")
+        try:
+            subprocess.run(
+                [ADB, "-s", ADDR, "shell", "monkey", "-p", "com.hypergryph.arknights", "1"],
+                capture_output=True, timeout=15,
+            )
+            log.info("启动命令已发送")
+            return True
+        except Exception as e:
+            log.error("启动游戏失败: %s", e)
+            return False
+
     def cleanup_after_battle(self) -> None:
-        """战斗结束后清理: 关闭结算 → 回到关卡选择。"""
         """战斗结束后清理: 关闭结算 → 回到关卡选择。"""
         img = self.screenshot()
         screen = self.detect_screen(img)

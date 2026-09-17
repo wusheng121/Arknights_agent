@@ -1,21 +1,18 @@
-# ---- 必需(P1 骨架可跑,纯标准库 + pytest)----
+# ---- 必需 ----
 pytest>=8
+python-dotenv>=1.0
+openai>=1.0
+opencv-python>=4.8
+numpy>=1.24
 
-# ---- Phase 1 Streamer MVP ----
-# edge-tts>=6.0
-# openai>=1.0                 # DeepSeek 兼容 OpenAI SDK
-# bilibili-api-python         # B 站弹幕/直播 WS(或裸 websockets)
-
-# ---- Phase 2 记忆 / RAG ----
-# chromadb>=0.5
-
-# ---- Phase 3 感知(MaaAI CV 模型推理,按 MaaAI 仓库说明部署)----
-# onnxruntime
-# opencv-python
-# numpy
-# Pillow
+# ---- AI 主播 ----
+edge-tts>=6.0
 
 # ---- MAA Python binding(非 PyPI)----
-# 从 MAA 主仓库 src/Python/asst.py 拷贝 + MaaCore.dll 放同目录/PYTHONPATH
+# 从 MAA 主仓库 src/Python/asst 包拷贝 + MaaCore.dll 放同目录/PYTHONPATH
 # 集成文档: https://docs.maa.plus/zh-cn/protocol/integration.html
-chromadb
+
+# ---- 可选(按需安装)----
+# bilibili-api-python    # B 站弹幕/直播 WS
+# onnxruntime            # MaaAI CV 模型推理
+# rapidocr-onnxruntime   # 自主导航 OCR

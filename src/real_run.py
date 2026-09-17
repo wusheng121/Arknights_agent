@@ -140,8 +140,8 @@ async def _verify_and_fallback_deploy(adb, addr, maa_path, job_data, tile_calc, 
 async def _ev_printer(ev):
     import json
     m = ev.msg
-    name = {3: "AllTasksCompleted", 10001: "ChainStart", 10002: "ChainCompleted",
-            20001: "SubTaskStart", 20002: "SubTaskCompleted", 20003: "SubTaskExtraInfo"}.get(m, str(m))
+    name = {3: "AllTasksCompleted", 10000: "TaskChainError", 10001: "ChainStart", 10002: "ChainCompleted",
+            20000: "SubTaskError", 20001: "SubTaskStart", 20002: "SubTaskCompleted", 20003: "SubTaskExtraInfo"}.get(m, str(m))
     what = ev.details.get("what", "")
     if what == "OperBoxInfo":
         inner = ev.details.get("details") or {}
@@ -538,123 +538,74 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
         log.error("connect 失败")
         return
 
-    # === UI 导航: 检测游戏状态,必要时启动+导航 ===
+    # === UI 导航: StartUp + Fight ===
     from src.game.ui_navigator import UINavigator
     _navigator = UINavigator()
     _nav_info = _navigator.get_screen_info()
-    log.info("当前界面: %s", _nav_info["screen"])
+    _screen = _nav_info["screen"]
+    log.info("当前界面: %s", _screen)
 
-    # 如果游戏没在运行(截图失败),启动游戏
-    if not _nav_info.get("has_image"):
-        log.info("=== 游戏未运行,启动游戏 ===")
-        _navigator.launch_game()
-        if not _navigator.wait_for_game_start(timeout=120):
-            log.error("游戏启动失败")
-            return
+    # 方案A: StartUp + Fight (最简单,验证导航链路)
+    # StartUp 必须填 client_type + start_game_enabled,否则 set_params 返回 false
+    log.info("=== MAA: StartUp + Fight ===")
+    await client.append("StartUp", {
+        "client_type": "Official",
+        "start_game_enabled": True,
+    })
+    _stage_code = stage
+    await client.append("Fight", {
+        "stage": _stage_code,
+        "times": 1,
+        "client_type": "Official",
+    })
 
-    # 两阶段: Fight 导航到关卡 → stop → Copilot 接管战斗
-    # Fight 自带导航(主界面→选章节→OCR找关卡→进入作战)
-    # 但 Fight 用代理指挥,不是 Copilot 作业
-    # 所以: Fight 导航到关卡详情页后 stop,再 Copilot 接管
-    log.info("=== MAA 两阶段: Fight(导航) → Copilot(战斗) ===")
+    # 启动 MAA 任务
+    _started2 = await client.start()
+    log.info("start() 返回: %s, running: %s", _started2, client.running())
+    if _started2:
+        await client.wait_done(timeout=300)
 
-    # 阶段1: StartUp + Fight 导航到关卡
-    await client.append("StartUp", {})
-    _stage_code = stage  # "1-7" 等
-    await client.append("Fight", {"stage": _stage_code, "times": 1})
-
-    _ENABLE_STREAMER = False
-    _streamer = None
-    _streamer_started = False
-
-    await client.start()
-
-    # 监控回调: 等待 Fight 导航完成(检测到 BattleStartPre 或 ChainCompleted)
-    import time as _time
-    _start_time = _time.time()
-    _fight_done = False
-    _battle_started = False
-
-    while True:
-        await asyncio.sleep(0.5)
-        if not client.running():
-            _fight_done = True
-            break
-        if _time.time() - _start_time > 120:
-            log.warning("Fight 阶段超时(120s), 强制停止")
-            client.stop()
-            _fight_done = True
-            break
-
-    log.info("Fight 阶段完成 (%.1fs)", _time.time() - _start_time)
-
-    # 检查当前界面: Fight 应该已经导航到关卡详情页或更远
-    _nav_info2 = _navigator.get_screen_info()
-    _screen2 = _nav_info2["screen"]
+    # === Step 2: 处理结算界面 (Fight 结束后可能在选关/结算) ===
+    _screen2 = _navigator.detect_screen()
     log.info("Fight 后界面: %s", _screen2)
+    if _screen2 == "results":
+        _navigator.dismiss_results()
+        await asyncio.sleep(2)
 
-    # 阶段2: Copilot 接管 (编队 + 开始战斗 + actions)
-    # Copilot filename 模式: BattleStartPre → Formation → BattleStartAll → Actions
-    log.info("=== 阶段2: Copilot 接管 ===")
+    # === Step 3: Copilot 自定义作业 ===
+    log.info("=== MAA Copilot: 自定义作业 (%s) ===", job_path)
     await client.append("Copilot", {
         "filename": job_path,
         "formation": True,
         "formation_index": 0,
     })
+    _started3 = await client.start()
+    log.info("Copilot start() 返回: %s, running: %s", _started3, client.running())
+    if _started3:
+        await client.wait_done(timeout=300)
 
-    await client.start()
-
-    # 等待 Copilot 完成
-    _copilot_start = _time.time()
-    while True:
-        await asyncio.sleep(0.5)
-        if not client.running():
-            break
-        if _time.time() - _copilot_start > 120:
-            log.warning("Copilot 阶段超时(120s), 强制停止")
-            client.stop()
-            break
-
-    log.info("Copilot 阶段完成 (%.1fs)", _time.time() - _copilot_start)
-
-    # === 战斗等待循环 (Copilot filename 模式不等战斗结束) ===
-    # 检查是否在战斗中,等战斗结束
+    # === 兜底: Copilot 的 AllTasksCompleted 只是"actions 执行完",不等战斗结束 ===
+    # 用 UINavigator 检测结算界面,等战斗真正结束
+    import time as _time
     _wait_start = _time.time()
-    _last_hp = 0
-    _no_change = 0
     while _time.time() - _wait_start < 300:
-        try:
-            _r = _sp.run([ADB, "-s", ADDR, "exec-out", "screencap", "-p"], capture_output=True, timeout=10)
-            _arr = _np.frombuffer(_r.stdout, dtype=_np.uint8)
-            _img = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-            if _img is None:
-                break
-            _hp_t = _cv2.imread(os.path.join(MAA, "resource", "template", "Battle", "BattleFlag", "BattleHpFlag.png"))
-            _ts = _cv2.resize(_hp_t, (int(_hp_t.shape[1]*1.5), int(_hp_t.shape[0]*1.5)))
-            _res = _cv2.matchTemplate(_img, _ts, _cv2.TM_CCOEFF_NORMED)
-            _, _hp_mv, _, _ = _cv2.minMaxLoc(_res)
-            if _hp_mv > 0.6:
-                _elapsed = _time.time() - _wait_start
-                if int(_elapsed) % 30 == 0:
-                    log.info("战斗中... (%.0fs)", _elapsed)
-                if abs(_hp_mv - _last_hp) < 0.01:
-                    _no_change += 1
-                    if _no_change > 60:
-                        log.warning("战斗卡住(5分钟无变化),退出")
-                        break
-                else:
-                    _no_change = 0
-                _last_hp = _hp_mv
-            else:
-                log.info("HP flag 消失 (%.2f), 战斗结束", _hp_mv)
-                break
-        except Exception:
+        _screen3 = _navigator.detect_screen()
+        if _screen3 == "results":
+            log.info("=== 战斗结束(结算界面) ===")
             break
+        if _screen3 in ("home", "formation") and _time.time() - _wait_start > 30:
+            log.info("=== 已离开战斗(%s),可能已结算 ===", _screen3)
+            break
+        _elapsed = _time.time() - _wait_start
+        if int(_elapsed) % 30 == 0:
+            log.info("等待战斗结束... 界面=%s (%.0fs)", _screen3, _elapsed)
         await asyncio.sleep(5)
+    else:
+        log.warning("等待战斗结束超时(300s)")
 
 
     # 如果 MAA 完成快(部署后立即结束),需要在这里也启动 AI 主播
-    if _ENABLE_STREAMER and _deploy_action_count > 0 and not _streamer_started:
+    if _deploy_action_count > 0 and not _streamer_started and _streamer is not None:
         log.info("=== AI 主播启动(延迟) ===")
         await _streamer.start()
         _streamer_started = True
@@ -678,7 +629,7 @@ async def _run_maa_copilot(job_path: str, job_data: dict, stage: str = "1-7") ->
                 log.info("  [%s] %s", ev.event_type, ev.message)
 
     # 停止 AI 主播
-    if _ENABLE_STREAMER and _streamer_started:
+    if _streamer is not None and _streamer_started:
         # 报告战斗结果
         try:
             _stars = _detect_battle_result(ADB, ADDR, MAA)

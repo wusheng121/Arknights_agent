@@ -131,7 +131,7 @@ async def _call_deepseek(client, model: str, system_prompt: str, user_content: s
     msg = resp.choices[0].message
     content = msg.content or "{}"
     import pathlib
-    pathlib.Path("deepseek_content.txt").write_text(content, encoding="utf-8")
+    pathlib.Path(os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "deepseek_content.txt")).write_text(content, encoding="utf-8")
     return json.loads(content)
 
 

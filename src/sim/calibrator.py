@@ -384,16 +384,21 @@ if __name__ == "__main__":
 
     stage = sys.argv[1] if len(sys.argv) > 1 else "1-7"
 
-    # Resolve stage
-    from src.data.stage_util import resolve_stage
-    stage_id, _ = resolve_stage(stage)
+    # Resolve stage: stage_code → stage_id
+    from src.data.stage_util import stage_code_to_id
+    stage_id = stage_code_to_id(stage)
+    if not stage_id:
+        print("无法解析关卡: %s" % stage)
+        sys.exit(1)
 
     # Find expert job
-    from src.data.rag_jobs import find_expert_job
-    job_path, job_data, _ = find_expert_job(stage_id)
-
-    if not job_path:
-        # Use copilot_job.json
+    from src.data.rag_jobs import search_expert_jobs_by_stage
+    jobs = search_expert_jobs_by_stage(stage_id)
+    if jobs:
+        job_path = jobs[0].path
+        with open(job_path, encoding="utf-8") as f:
+            job_data = json.load(f)
+    else:
         job_path = os.path.join(os.path.dirname(__file__), "..", "..", "copilot_job.json")
         with open(job_path, encoding="utf-8") as f:
             job_data = json.load(f)
