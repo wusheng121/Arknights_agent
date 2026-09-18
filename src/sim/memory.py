@@ -181,8 +181,11 @@ class MemoryStore:
 
     def _promote_to_principles(self, entry: MemoryEntry) -> None:
         """将反复出现的教训提升为原则。"""
+        # Create principles.json if it doesn't exist
         if not os.path.exists(PRINCIPLES_PATH):
-            return
+            os.makedirs(os.path.dirname(PRINCIPLES_PATH), exist_ok=True)
+            with open(PRINCIPLES_PATH, "w", encoding="utf-8") as f:
+                json.dump({"principles": []}, f, ensure_ascii=False, indent=2)
         with open(PRINCIPLES_PATH, encoding="utf-8") as f:
             p_data = json.load(f)
         principles = p_data.get("principles", [])
@@ -231,17 +234,63 @@ def classify_failure(sim_result: dict, job: dict) -> MemoryEntry:
         outcome = "leak" if failure.get("leaks", 0) > 0 else "timeout"
         # Classify failure mode
         failure_mode = "timeout"  # default
-        if failure.get("no_healing_targets", 0) > 0:
+
+        # Check for skill misuse: skill_activated then skill_ended within 2 ticks
+        skill_activated_events = [e for e in events if e.get("event") == "skill_activated"]
+        skill_ended_events = [e for e in events if e.get("event") == "skill_ended"]
+        skill_misused = False
+        for sa in skill_activated_events:
+            op = sa.get("oper", "")
+            sa_tick = sa.get("tick", 0)
+            for se in skill_ended_events:
+                if se.get("oper") == op and 0 < se.get("tick", 0) - sa_tick <= 2:
+                    skill_misused = True
+                    break
+            if skill_misused:
+                break
+
+        # Check for operator_useless: deployed but never killed any enemy
+        deployed_ops = set()
+        for e in events:
+            if e.get("event") == "deploy":
+                deployed_ops.add(e.get("oper", ""))
+        killing_ops = set()
+        for e in events:
+            if e.get("event") == "enemy_killed":
+                killing_ops.add(e.get("by", ""))
+        useless_ops = deployed_ops - killing_ops
+        # Only count if the operator was alive for a significant time
+        operator_useless = False
+        if useless_ops:
+            for op in useless_ops:
+                deploy_events = [e for e in events if e.get("oper") == op and e.get("event") == "deploy"]
+                if deploy_events:
+                    deploy_tick = deploy_events[0].get("tick", 0)
+                    if result.get("ticks", 0) - deploy_tick > 50:  # alive for >5 seconds
+                        operator_useless = True
+                        break
+
+        # Check for deploy_too_late: deploy_failed with not_enough_dp
+        deploy_failed_dp = [e for e in events if e.get("event") == "deploy_failed"
+                            and "not_enough_dp" in str(e.get("reason", ""))]
+
+        # Priority order (most specific first)
+        if skill_misused:
+            failure_mode = "skill_misused"
+        elif failure.get("no_healing_targets", 0) > 0:
             failure_mode = "no_healing_coverage"
         elif failure.get("skill_not_ready", 0) > 0:
             failure_mode = "skill_not_ready"
+        elif operator_useless:
+            failure_mode = "operator_useless"
         elif failure.get("leaks", 0) > 0:
-            # Check if it's concentrated blockers or too slow
             operator_deaths = failure.get("operator_deaths", 0)
             if operator_deaths > 0:
                 failure_mode = "too_slow_kills"
             else:
                 failure_mode = "concentrated_blockers"
+        elif deploy_failed_dp:
+            failure_mode = "deploy_too_late"
         elif "timeout" in str(failure.get("root_causes", [])):
             failure_mode = "timeout"
 
@@ -288,6 +337,40 @@ def _generate_lesson(failure_mode: str, root_cause: str, deployments: list, even
     if failure_mode == "clear":
         return "通关成功，当前作业有效"
     
+    if failure_mode == "skill_misused":
+        # Find the misused skill
+        skill_activated_events = [e for e in events if e.get("event") == "skill_activated"]
+        skill_ended_events = [e for e in events if e.get("event") == "skill_ended"]
+        for sa in skill_activated_events:
+            op = sa.get("oper", "")
+            sa_tick = sa.get("tick", 0)
+            for se in skill_ended_events:
+                if se.get("oper") == op and 0 < se.get("tick", 0) - sa_tick <= 2:
+                    return f"{op}技能开启后{se.get('tick',0)-sa_tick}tick就关闭，弹药制技能应设skill_usage=1自动开启，不要手动Skill action"
+        return "技能使用错误(秒开秒关)，弹药制技能(duration=-1)应设skill_usage=1自动开启"
+
+    if failure_mode == "operator_useless":
+        # Find the useless operator
+        deployed_ops = set()
+        for e in events:
+            if e.get("event") == "deploy":
+                deployed_ops.add(e.get("oper", ""))
+        killing_ops = set()
+        for e in events:
+            if e.get("event") == "enemy_killed":
+                killing_ops.add(e.get("by", ""))
+        useless = deployed_ops - killing_ops
+        if useless:
+            op = list(useless)[0]
+            return f"{op}部署后从未击杀敌人，位置或朝向不对，应移到敌人路径上"
+        return "干员部署后无作用，应检查位置和朝向"
+
+    if failure_mode == "deploy_too_late":
+        dp_fails = [e for e in events if e.get("event") == "deploy_failed" and "not_enough_dp" in str(e.get("reason", ""))]
+        if dp_fails:
+            return f"部署失败(DP不足) {len(dp_fails)}次，应降低先锋费用或调整部署顺序先下低费"
+        return "部署太晚(DP管理不当)，应先下低费先锋回费"
+
     if failure_mode == "no_healing_coverage":
         # Find medic position
         medics = [d for d in deployments if "夜莺" in d.get("name", "") or "闪灵" in d.get("name", "")]

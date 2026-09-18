@@ -18,14 +18,24 @@ log = logging.getLogger(__name__)
 PROMPT_FIX = """你是明日方舟战术修正师。一份作业在模拟器中失败了,根据失败分析修正作业。
 
 **失败信息:**
-- failure_analysis: 根因分析(漏怪/干员死亡/技能未就绪/医疗无目标)
-- events: 关键事件时间线
-- snapshot: 最后状态快照
+- failure_mode: 失败类型标签(如 no_healing_coverage/skill_not_ready/concentrated_blockers/too_slow_kills)
+- failure_analysis: 根因分析(漏怪次数/干员死亡/技能未就绪/医疗无目标次数 + root_causes 列表)
+- events: 完整事件时间线(含 tick/事件类型/详情)
+  关键事件类型: deploy_failed(部署失败)/skill_not_ready(技能没好)/enemy_leaked(漏怪)/
+  operator_died(干员死亡)/warning(警告: no_healing_targets=治疗无目标)/enemy_killed(击杀)
+- snapshot: 最后状态快照(含每个干员的 skill_sp/skill_ready/targets_in_range/healing_targets)
 - current_job: 当前作业(operators + actions)
 - condition_issues: 条件可行性问题(如有)
+- prior_lessons: 该关卡历史教训(如有,从上次失败中总结的 lesson)
+- operator_skills: 每个干员选的技能编号
 
 **修正原则:**
-- 根据根因修正: 如果是"医疗无目标"→移动医疗位置; 如果是"技能未就绪"→加kills条件或换技能
+- 根据 failure_mode 和 root_causes 精准修正:
+  - no_healing_coverage → 移动医疗到 range_tiles 能覆盖友方的位置(检查 snapshot 中 healing_targets=0 的干员)
+  - skill_not_ready → 加 kills=N 条件等 SP 充满(检查 snapshot 中 skill_sp < skill_max_sp)
+  - concentrated_blockers → 减少同一路径阻挡型干员(检查 events 中 enemy_blocked 分布)
+  - too_slow_kills → 增加输出或换技能(检查 blackboard 中 atk 倍率)
+  - leak → 在漏怪路径加阻挡或输出(检查 events 中 enemy_leaked 的 route)
 - 条件化修正: 用 kills/costs 条件代替固定时间
   - 技能没好 → 加 kills=N 条件等 SP 充满
   - 费用不够 → 加 costs=N 条件等费用
@@ -103,12 +113,38 @@ async def validate_and_fix(
         log.info("[sim] ❌ FAILED. Root causes: %s", result["failure"].get("root_causes", []))
         log.info("[sim] Asking LLM to fix...")
 
+        # Classify failure mode for targeted fix advice
+        from src.sim.memory import MemoryStore, classify_failure
+        try:
+            entry = classify_failure(result, current_job)
+            failure_mode = entry.failure_mode
+            lesson = entry.lesson
+        except Exception:
+            failure_mode = "unknown"
+            lesson = ""
+
+        # Get prior lessons from memory
+        prior_lessons = ""
+        try:
+            mem = MemoryStore()
+            prior_lessons = mem.get_lessons_for_prompt(stage_id) or ""
+        except Exception:
+            pass
+
         # Get skill mapping from opers
         oper_skills = {o.get("name", ""): o.get("skill", 1) for o in current_job.get("opers", [])}
 
+        # Events: keep early events (deploy_failed etc) + late events (leaks)
+        all_events = result["events"]
+        if len(all_events) > 80:
+            events_brief = all_events[:40] + all_events[-40:]
+        else:
+            events_brief = all_events
+
         fix_input = json.dumps({
+            "failure_mode": failure_mode,
             "failure_analysis": result["failure"],
-            "events": result["events"][-30:],
+            "events": events_brief,
             "snapshot": result["snapshot"],
             "current_job": {
                 "opers": current_job.get("opers", []),
@@ -116,6 +152,8 @@ async def validate_and_fix(
             },
             "oper_skills": oper_skills,
             "condition_issues": issues,
+            "prior_lessons": prior_lessons,
+            "lesson": lesson,
         }, ensure_ascii=False)
 
         resp = await client.chat.completions.create(

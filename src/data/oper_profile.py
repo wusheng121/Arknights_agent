@@ -214,6 +214,152 @@ def _detect_combat_role(profession: str, sub_profession: str, skills: list, skil
     return "lane_holder"
 
 
+def get_operator_structured(name: str, char_path: str = "", skill_path: str = "") -> dict:
+    """获取干员完整结构化数据(给 LLM 用,不丢精度)。
+
+    Returns:
+        {"name":"夜莺","role":"support","profession":"MEDIC","sub_profession":"医疗",
+         "stats":{"hp":2500,"atk":400,"def":200,"res":0.0,"block":0,"cost":18,"attack_time":1.0},
+         "range_tiles":[[0,2],[1,2],...],
+         "trait":"治疗友方单位",
+         "talents":[{"name":"大地的庇护","desc":"..."}],
+         "skills":[{"skill":3,"name":"...","sp_type":"INCREASE_WITH_TIME","sp_cost":50,"sp_init":30,
+                    "skill_type":"MANUAL","duration":-1.0,"blackboard":{"atk":1.5,"healing_scale":2.0},
+                    "description":"..."}]}
+    """
+    char_data = _load_char_table(char_path)
+    skill_data = _load_skill_table(skill_path)
+
+    char_id = None
+    for k, v in char_data.items():
+        if v.get("name") == name:
+            char_id = k
+            break
+    if not char_id:
+        return {}
+
+    char = char_data[char_id]
+    prof = char.get("profession", "")
+    sub = char.get("subProfessionId", "")
+    sub_cn = SUB_PROFESSION_MAP.get(sub, sub)
+    tags = char.get("tagList", [])
+
+    trait_desc_text = ""
+    trait = char.get("trait", {})
+    if isinstance(trait, dict):
+        candidates = trait.get("candidates", [])
+        if candidates:
+            trait_desc_text = _clean_text(candidates[-1].get("description", ""))
+    combat_role = _detect_combat_role(prof, sub, char.get("skills", []), skill_data, tags, trait_desc_text)
+
+    block = deploy_cost = 0
+    hp = atk = defense = res = 0
+    attack_time = 0.0
+    phases = char.get("phases", [])
+    if len(phases) >= 3:
+        attrs = phases[2].get("attributesKeyFrames", [])
+        if attrs:
+            data = attrs[-1].get("data", {})
+            block = data.get("blockCnt", 0) or 0
+            deploy_cost = data.get("cost", 0) or 0
+            hp = _get_attr_val(data.get("maxHp"))
+            atk = _get_attr_val(data.get("atk"))
+            defense = _get_attr_val(data.get("def"))
+            res = _get_attr_val(data.get("magicResistance"))
+            attack_time = _get_attr_val(data.get("baseAttackTime"))
+    elif phases:
+        attrs = phases[0].get("attributesKeyFrames", [])
+        if attrs:
+            data = attrs[-1].get("data", {})
+            block = data.get("blockCnt", 0) or 0
+            deploy_cost = data.get("cost", 0) or 0
+            hp = _get_attr_val(data.get("maxHp"))
+            atk = _get_attr_val(data.get("atk"))
+            defense = _get_attr_val(data.get("def"))
+            res = _get_attr_val(data.get("magicResistance"))
+            attack_time = _get_attr_val(data.get("baseAttackTime"))
+
+    range_tiles = _get_range_tiles(name)
+
+    talents = []
+    for t in char.get("talents", []):
+        for c in t.get("candidates", []):
+            if c.get("unlockCondition", {}).get("phase") == "PHASE_2":
+                tname = c.get("name", "")
+                tdesc = _clean_text(c.get("description", ""))
+                if tname and tdesc:
+                    talents.append({"name": tname, "desc": tdesc})
+                break
+
+    skills_struct = []
+    for i, s_ref in enumerate(char.get("skills", [])):
+        skill_id = s_ref.get("skillId", "")
+        if not skill_id or skill_id not in skill_data:
+            continue
+        s_data = skill_data[skill_id]
+        levels = s_data.get("levels", [])
+        if not levels:
+            continue
+        lv = levels[-1] if len(levels) >= 7 else levels[0]
+        sname = lv.get("name", "")
+        sdesc = _clean_text(lv.get("description", ""))
+        sp = lv.get("spData", {})
+        sp_cost = int(sp.get("spCost", 0) or 0)
+        sp_init = int(sp.get("initSp", 0) or 0)
+        sp_type = sp.get("spType", "")
+        dur = float(lv.get("duration", 0) or 0)
+        skill_type = lv.get("skillType", "MANUAL")
+
+        bb_raw = lv.get("blackboard", [])
+        bb = {}
+        if isinstance(bb_raw, list):
+            for b in bb_raw:
+                key = b.get("key", "")
+                val = b.get("value", 0)
+                if key and val:
+                    bb[key] = val
+        elif isinstance(bb_raw, dict):
+            bb = {k: v for k, v in bb_raw.items() if v}
+
+        skills_struct.append({
+            "skill": i + 1,
+            "name": sname,
+            "sp_type": sp_type,
+            "sp_cost": sp_cost,
+            "sp_init": sp_init,
+            "skill_type": skill_type,
+            "duration": dur,
+            "blackboard": bb,
+            "description": sdesc,
+        })
+
+    return {
+        "name": name,
+        "role": combat_role,
+        "profession": prof,
+        "sub_profession": sub_cn,
+        "stats": {
+            "hp": int(hp), "atk": int(atk), "def": int(defense),
+            "res": float(res), "block": int(block), "cost": int(deploy_cost),
+            "attack_time": float(attack_time),
+        },
+        "range_tiles": range_tiles,
+        "trait": trait_desc_text,
+        "talents": talents,
+        "skills": skills_struct,
+    }
+
+
+def get_profiles_structured(names: list[str], char_path: str = "", skill_path: str = "") -> list[dict]:
+    """批量获取多个干员的结构化数据。"""
+    result = []
+    for name in names:
+        data = get_operator_structured(name, char_path, skill_path)
+        if data:
+            result.append(data)
+    return result
+
+
 def get_operator_profile(name: str, char_path: str = "", skill_path: str = "") -> str:
     """获取单个干员的完整特性描述。
 

@@ -23,6 +23,8 @@ class EnemyInfo:
     move_speed: float = 0.0
     attack_speed: float = 0.0
     mass_level: int = 0
+    atk_time: float = 0.0
+    life_point_reduce: int = 1
 
 
 _enemy_cache: dict = None
@@ -48,6 +50,8 @@ def lookup_enemy(enemy_id: str, db_path: str = "", handbook_path: str = "") -> E
         move_speed=float(s.get("moveSpeed", 0) or 0),
         attack_speed=float(s.get("attackSpeed", 0) or 0),
         mass_level=int(s.get("massLevel", 0) or 0),
+        atk_time=float(s.get("baseAttackTime", 0) or 0),
+        life_point_reduce=int(s.get("lifePointReduce", 1) or 1),
     )
 
 
@@ -76,6 +80,10 @@ def to_compact_description(enemy_ids: list[str], db_path: str = "", handbook_pat
                 extras.append("移速%.1f" % info.move_speed)
             if info.mass_level:
                 extras.append("重量%d" % info.mass_level)
+            if info.atk_time:
+                extras.append("攻速%.1fs" % info.atk_time)
+            if info.life_point_reduce and info.life_point_reduce != 1:
+                extras.append("漏扣%d" % info.life_point_reduce)
             extra_str = " " + " ".join(extras) if extras else ""
             parts.append("%s: HP%d ATK%d DEF%d RES%d%s" % (
                 info.name, info.hp, info.atk, info.defense, int(info.res), extra_str))
@@ -103,7 +111,7 @@ def _load_enemy_stats(db_path: str = "") -> dict:
         ed = v0.get("enemyData", {})
         attrs = ed.get("attributes", {})
         stats = {}
-        for k in ("maxHp", "atk", "def", "magicResistance", "moveSpeed", "attackSpeed", "massLevel"):
+        for k in ("maxHp", "atk", "def", "magicResistance", "moveSpeed", "attackSpeed", "massLevel", "baseAttackTime", "lifePointReduce"):
             val = attrs.get(k)
             if isinstance(val, dict):
                 stats[k] = val.get("m_value")

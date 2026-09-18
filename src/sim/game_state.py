@@ -581,6 +581,9 @@ class GameState:
         deaths = [e for e in self.events if e.event == "operator_died"]
         skill_issues = [e for e in self.events if e.event == "skill_not_ready"]
         no_heal = [e for e in self.events if e.event == "warning" and e.details.get("reason") == "no_healing_targets"]
+        kills = [e for e in self.events if e.event == "enemy_killed"]
+        deploys = [e for e in self.events if e.event == "deploy"]
+        deploy_fails = [e for e in self.events if e.event == "deploy_failed"]
 
         causes = []
         if leaks:
@@ -591,6 +594,8 @@ class GameState:
             causes.append(f"技能未就绪{len(skill_issues)}次: {', '.join(s.details.get('oper','') for s in skill_issues)}")
         if no_heal:
             causes.append(f"医疗无目标{len(no_heal)}次: {', '.join(n.details.get('oper','') for n in no_heal)}")
+        if deploy_fails:
+            causes.append(f"部署失败{len(deploy_fails)}次: {', '.join(d.details.get('reason','') for d in deploy_fails)}")
 
         return {
             "result": "win" if self.won else "lose",
@@ -599,6 +604,9 @@ class GameState:
             "operator_deaths": len(deaths),
             "skill_not_ready": len(skill_issues),
             "no_healing_targets": len(no_heal),
+            "kills_total": len(kills),
+            "deploys_total": len(deploys),
+            "deploy_failed": len(deploy_fails),
             "root_causes": causes,
         }
 

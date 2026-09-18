@@ -28,11 +28,27 @@ PROMPT_STEP1_SELECT = """你是明日方舟战斗指挥。根据地图、波次�
 **输入字段说明:**
 - map: 地图信息(红蓝门/可部署格子/敌人方向/战术建议)
 - waves: 出怪波次(时间/敌人/路线)
-- enemies: 敌人属性(HP/ATK/DEF/RES)
+- enemies: 敌人属性(HP/ATK/DEF/RES/移速/重量)
 - principles: 因果原则(pattern/condition/reason)
 - expert_reference: 专家作业参考(干员选择/位置/技能/操作序列)
 - strategy_knowledge: 1365份作业的统计规律
-- available_operators: 用户可用干员(角色/阻挡/费用/范围/天赋/技能)
+- available_operators: 结构化干员数据数组,每个含:
+  - name, role(战斗角色), profession, sub_profession
+  - stats: {hp, atk, def, res, block, cost, attack_time}
+  - range_tiles: 攻击范围坐标数组 [[x,y],...],相对于干员位置
+  - trait: 特性描述
+  - talents: 天赋列表 [{name, desc}]
+  - skills: 技能列表 [{skill, name, sp_type, sp_cost, sp_init, skill_type, duration, blackboard, description}]
+    - skill_type: PASSIVE(被动)/AUTO(自动)/MANUAL(手动)
+    - duration: -1=弹药制(可手动关闭), >0=持续秒数, 0=瞬时
+    - blackboard: 技能数值效果 {atk:1.8, base_attack_time:2.9, ...}
+
+**选人逻辑:**
+- 用 stats.hp/atk/def 判断生存和输出能力
+- 用 range_tiles 判断攻击范围覆盖
+- 用 skills.blackboard 判断技能倍率(如 atk:1.8=攻击力+80%)
+- 用 skills.skill_type 判断自动/手动触发
+- 用 skills.duration=-1 识别弹药制技能
 
 只输出 JSON: {"selected":[{"name":"干员名"}]}
 """
@@ -42,31 +58,51 @@ PROMPT_STEP2_POSITION = """你是明日方舟战术规划师。根据地图、�
 **学习而非照抄:**
 - 如果有 expert_positions: 理解专家为什么放在那个位置(攻击范围覆盖哪条路径?),根据用户干员的攻击范围调整
 - 如果没有: 根据敌人路径和干员攻击范围自行推理最佳位置
-- 核心推理: "这个干员的攻击范围从这里能覆盖几条敌人路径?"
+- 核心推理: "这个干员的 range_tiles 从 [x,y] 朝 direction 能覆盖哪些敌人路径?"
 
 **输入字段说明:**
 - map: 地图格子(地面/高台可部署) + 红蓝门 + 战术建议
 - enemy_paths: 敌人移动路径(坐标序列,从红门到蓝门)
-- operators: 每个干员的角色/阻挡数/费用/攻击范围大小
+- operators: 结构化干员数据(含 range_tiles 坐标数组)
+  - range_tiles 是相对坐标 [[x,y],...],方向旋转后需调整
+  - profession: WARRIOR/TANK/PIONEER/SPECIAL=地面, MEDIC/SNIPER/CASTER/SUPPORT=高台
+  - stats.block: 阻挡数(1-3)
 - expert_positions: 专家作业的位置和方向(如果有)
 
-地面职业只能放地面格子,高台职业只能放高台格子。同一格子不能放两个。
+**位置推理:**
+- 地面职业(profession=WARRIOR/TANK/PIONEER/SPECIAL)只能放地面格子
+- 高台职业(profession=MEDIC/SNIPER/CASTER/SUPPORT)只能放高台格子
+- 同一格子不能放两个
+- 医疗干员放能治疗到友方的位置(range_tiles 覆盖友方)
+- 阻挡型干员放敌人路径上(range_tiles 覆盖敌人路径)
 
 只输出 JSON: {"positions":[{"name":"干员名","location":[x,y],"direction":"Right"}]}
 """
 
-PROMPT_STEP3_SKILL = """你是明日方舟技能专家。根据干员技能描述、敌人属性和策略知识,选技能。
+PROMPT_STEP3_SKILL = """你是明日方舟技能专家。根据干员技能数据、敌人属性和策略知识,选技能。
 
 **学习而非照抄:**
 - 如果有 strategy_knowledge: 参考统计规律(如"圣聆初雪常用skill2, 246/251次")
-- 如果没有: 根据技能描述和敌人属性推理(高防用法术技能,低防用物理技能)
-- 理解技能描述的关键词: "回复...部署费用"=回费, "攻击力+"=增伤, "防御力+"=生存, "持续X秒"=持续时间
-- skill_usage=1 表示自动开技能
+- 如果没有: 根据 blackboard 数值和敌人属性推理
 
 **输入字段说明:**
 - enemies: 敌人属性(HP/ATK/DEF/RES)
-- operators: 每个干员的技能描述(name/CD/持续时间/效果关键词)
+- operators: 结构化干员数据,含完整 skills 数组:
+  - skill: 技能编号(1/2/3)
+  - name: 技能名
+  - sp_type: INCREASE_WITH_TIME(每秒充能)/INCREASE_WHEN_ATTACK(攻击时充能)
+  - sp_cost: SP需求量, sp_init: 初始SP
+  - skill_type: PASSIVE(被动)/AUTO(自动触发)/MANUAL(手动触发)
+  - duration: -1=弹药制(可手动关闭,有max_cnt限制), >0=持续N秒, 0=瞬时
+  - blackboard: 数值效果,如 {atk:1.8}=攻击力+80%, {base_attack_time:2.9}=攻速变2.9倍
 - strategy_knowledge: 统计规律(哪个干员常用几技能)
+
+**技能选择逻辑:**
+- 弹药制(duration=-1, blackboard含max_cnt): 适合 skill_usage=1 自动开启
+- AUTO skill_type: SP满自动触发,适合 skill_usage=1
+- MANUAL skill_type: 需手动 Skill action 触发,加 kills 条件等SP充满
+- 高防敌人(DEF>500)选法术技能(blackboard含magic_resistance降低或arts伤害)
+- 低防敌人选物理技能(blackboard含atk_scale倍率)
 
 只输出 JSON: {"skills":[{"name":"干员名","skill":1,"skill_usage":1}]}
 """
@@ -175,28 +211,15 @@ async def generate_job_pipeline(
         reverse=True,
     )[:40]
 
+    # ===== 获取结构化干员数据 (完整 stats + range_tiles + skills + blackboard) =====
+    from src.data.oper_profile import get_operator_structured
+    top_names = [o.get("name", "") for o in top if o.get("name")]
+    ops_structured = [get_operator_structured(n) for n in top_names]
+    ops_structured = [d for d in ops_structured if d]
+
     # ===== Step 1: 选干员 =====
-    ops_brief = []
-    for o in top:
-        name = o.get("name", "")
-        od = db.find_oper(name)
-        role = od.location_type if od else "?"
-        ops_brief.append({"name": name, "rarity": o.get("rarity"), "elite": o.get("elite"), "level": o.get("level"), "deploy_type": role})
-
-    # 从 oper_profiles 提取精简特性 (name + role + cost + range)
-    import re
-    ops_with_roles = []
-    for line in oper_profiles_full.split("\n") if oper_profiles_full else []:
-        m = re.match(r"(.+?)\s*\[(\w+)\].*?阻挡(\d+).*?费用(\d+).*?范围(.+?)(?:\s|天|$)", line)
-        if m:
-            ops_with_roles.append({
-                "name": m.group(1).strip(),
-                "role": m.group(2),
-                "block": int(m.group(3)),
-                "cost": int(m.group(4)),
-                "range": m.group(5).strip(),
-            })
-
+    # 传完整结构化数据: stats(HP/ATK/DEF/RES/block/cost) + range_tiles + skills(sp_cost/skill_type/duration/blackboard)
+    # 让 LLM 能计算: 谁抗得住(HP/DEF) / 谁打得动(ATK vs 敌人DEF) / 技能类型(弹药制/自动触发)
     step1_user = json.dumps({
         "stage": stage,
         "map": map_info,
@@ -205,37 +228,22 @@ async def generate_job_pipeline(
         "expert_reference": rag_context,
         "strategy_knowledge": strategy_knowledge,
         "principles": principles,
-        "available_operators": ops_with_roles if ops_with_roles else ops_brief,
+        "available_operators": ops_structured,
     }, ensure_ascii=False)
 
-    log.info("[Step1] 选干员...")
+    log.info("[Step1] 选干员... (%d structured operators)", len(ops_structured))
     step1_result = await _call_deepseek(client, mdl, PROMPT_STEP1_SELECT, step1_user)
     selected_names = [o["name"] for o in step1_result.get("selected", [])]
     log.info("[Step1] 选中: %s", ", ".join(selected_names))
 
     # ===== Step 2: 选位置 =====
-    # 精简干员信息: 只保留角色/阻挡/费用/范围,去掉天赋/技能描述(减少噪音)
-    import re as _re2
-    position_profiles = []
-    for name in selected_names:
-        for line in (oper_profiles_full.split("\n") if oper_profiles_full else []):
-            if line.startswith(name + " "):
-                m = _re2.search(r'\[(\w+)\].*?阻挡(\d+).*?费用(\d+).*?范围(.+?)(?:\s|天|$)', line)
-                if m:
-                    position_profiles.append({
-                        "name": name,
-                        "role": m.group(1),
-                        "block": int(m.group(2)),
-                        "cost": int(m.group(3)),
-                        "range": m.group(4).strip(),
-                    })
-                break
-
+    # 传 range_tiles 坐标 + 地图可部署格子,LLM 可计算覆盖范围
+    selected_ops = [d for d in ops_structured if d["name"] in selected_names]
     step2_user = json.dumps({
         "stage": stage,
         "map": map_info,
         "enemy_paths": paths_desc,
-        "operators": position_profiles,
+        "operators": selected_ops,
         "expert_positions": rag_context,
         "principles": principles,
     }, ensure_ascii=False)
@@ -246,13 +254,14 @@ async def generate_job_pipeline(
     log.info("[Step2] 位置: %s", json.dumps(positions, ensure_ascii=False)[:200])
 
     # ===== Step 3: 选技能 =====
-    # 给选中干员的技能描述
-    from src.data.oper_profile import get_operator_profile
+    # 传完整 skill 数据: sp_type/sp_cost/sp_init/skill_type/duration/blackboard
+    # 让 LLM 能判断: 弹药制(duration=-1, max_cnt) / 自动触发(AUTO) / SP 充能速度
     skill_profiles = []
     for name in selected_names:
-        p = get_operator_profile(name)
-        if p:
-            skill_profiles.append(p)
+        for d in selected_ops:
+            if d["name"] == name:
+                skill_profiles.append(d)
+                break
 
     step3_user = json.dumps({
         "stage": stage,
@@ -268,31 +277,28 @@ async def generate_job_pipeline(
     log.info("[Step3] 技能: %s", json.dumps(skills, ensure_ascii=False)[:200])
 
     # ===== Step 4: 定部署顺序 =====
-    # 合并位置 + 费用 + 技能
     pos_map = {p["name"]: p for p in positions}
     skill_map = {s["name"]: s for s in skills}
 
-    # 从 oper_profile 提取费用
+    # 从结构化数据获取 cost (不再用 regex 解析)
     cost_map = {}
-    for line in (oper_profiles_full.split("\n") if oper_profiles_full else []):
-        for name in selected_names:
-            if line.startswith(name + " "):
-                cm = re.search(r"费用(\d+)", line)
-                if cm:
-                    cost_map[name] = int(cm.group(1))
-                break
+    for d in ops_structured:
+        if d["name"] in selected_names:
+            cost_map[d["name"]] = d["stats"]["cost"]
 
     deploy_list = []
     for name in selected_names:
         pos = pos_map.get(name, {})
         sk = skill_map.get(name, {})
-        # 确定守哪个蓝门
         blue_door = "?"
         if pos.get("location") and blue_doors:
             loc = pos["location"]
             distances = [(abs(int(loc[0])-bd[0])+abs(int(loc[1])-bd[1]), bd) for bd in blue_doors]
             if distances:
                 blue_door = str(min(distances)[1])
+        # 从结构化数据判断地面/高台
+        is_ground = any(d["name"] == name and d["profession"] in ("WARRIOR", "TANK", "PIONEER", "SPECIAL")
+                        for d in ops_structured)
         deploy_list.append({
             "name": name,
             "location": pos.get("location", [0, 0]),
@@ -301,7 +307,7 @@ async def generate_job_pipeline(
             "skill": sk.get("skill", 1),
             "skill_usage": sk.get("skill_usage", 1),
             "defends_blue_door": blue_door,
-            "is_ground": _is_ground_operator(name, oper_profiles_full),
+            "is_ground": is_ground,
         })
 
     step4_user = json.dumps({
